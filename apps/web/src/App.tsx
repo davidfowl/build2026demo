@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Bot, CheckCircle2, Clock3, ShieldCheck, XCircle } from 'lucide-react';
 import {
   type AppState,
   type BrokerDecision,
@@ -10,9 +11,14 @@ import {
   primaryCalendarId,
 } from '@build2026/shared';
 
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { cn } from '@/lib/utils';
+
 const dayStartHour = 8;
 const dayEndHour = 18;
-const pixelsPerMinute = 1.45;
+const pixelsPerMinute = 1.16;
 const snapMinutes = 15;
 
 type DragState = {
@@ -38,18 +44,30 @@ type Toast = {
   message: string;
 };
 
+const eventKindStyles: Record<CalendarEvent['kind'], string> = {
+  focus: 'border-l-blue-400 bg-blue-400/10 text-blue-50 hover:bg-blue-400/15',
+  task: 'border-l-emerald-400 bg-emerald-400/10 text-emerald-50 hover:bg-emerald-400/15',
+  draft: 'border-l-violet-400 bg-violet-400/10 text-violet-50 hover:bg-violet-400/15',
+  meeting: 'border-l-amber-400 bg-amber-400/10 text-amber-50 hover:bg-amber-400/15',
+  team: 'border-l-rose-400 bg-rose-400/10 text-rose-50 hover:bg-rose-400/15',
+};
+
+const optimisticStatusStyles: Record<OptimisticMove['status'], string> = {
+  planning: 'outline outline-1 outline-offset-2 outline-blue-200/60',
+  'pending-confirmation': 'outline outline-1 outline-offset-2 outline-amber-200/70',
+};
+
 export function App() {
   const [state, setState] = useState<AppState | undefined>();
   const [selectedId, setSelectedId] = useState('focus-1');
   const [drag, setDrag] = useState<DragState | undefined>();
   const [optimisticMoves, setOptimisticMoves] = useState<Record<string, OptimisticMove>>({});
   const [toast, setToast] = useState<Toast | undefined>();
-  const [agentSession, setAgentSession] = useState<unknown>();
-  const dragRef = useRef<DragState | undefined>();
+  const dragRef = useRef<DragState | undefined>(undefined);
   const toastId = useRef(0);
 
   const displayedEvents = useMemo(
-    () => state?.events.map((event) => optimisticMoves[event.id] ? { ...event, ...optimisticMoves[event.id] } : event) ?? [],
+    () => state?.events.map((event) => (optimisticMoves[event.id] ? { ...event, ...optimisticMoves[event.id] } : event)) ?? [],
     [optimisticMoves, state],
   );
   const selectedEvent = useMemo(() => displayedEvents.find((event) => event.id === selectedId), [displayedEvents, selectedId]);
@@ -217,17 +235,6 @@ export function App() {
     showToast(`Planning intent queued for "${event.title}".`);
   }
 
-  async function runCommand(path: string, label: string) {
-    const result = await api(path, { method: 'POST' });
-    if (path.includes('/reset') || path.includes('/clear-pending')) {
-      setOptimisticMoves({});
-    }
-    showToast(label);
-    if (path.includes('agent-session')) {
-      setAgentSession(result);
-    }
-  }
-
   async function confirm(decision: BrokerDecision) {
     await api(`/api/proposals/${decision.proposalId}/patches/${decision.patchId}/confirm`, { method: 'POST' });
     showToast('Broker re-validated and applied the confirmed patch.');
@@ -246,28 +253,40 @@ export function App() {
   }
 
   if (!state) {
-    return <main className="loading">Loading calendar broker state...</main>;
+    return (
+      <main className="grid min-h-screen place-items-center text-sm text-muted-foreground">
+        Loading calendar broker state...
+      </main>
+    );
   }
 
   return (
-    <main className="shell">
-      <section className="hero">
-        <div>
-          <p className="eyebrow">Build 2026 demo</p>
-          <h1>Aspire with agents: a shared executable app model</h1>
-          <p className="thesis">
-            Drag the calendar like Figma for time. The planner can reason in the background, but the broker owns
-            deterministic, auditable calendar writes.
-          </p>
-        </div>
-        <div className="scoreboard" aria-label="Broker decisions">
-          <Metric label="Applied" value={metrics.applied} tone="good" />
-          <Metric label="Needs confirmation" value={metrics.pending} tone="hold" />
-          <Metric label="Rejected" value={metrics.rejected} tone="bad" />
+    <main className="mx-auto flex w-full max-w-[1320px] flex-col gap-4 px-5 py-5">
+      <section className="rounded-xl border border-border/70 bg-card/60 px-4 py-3 shadow-sm backdrop-blur">
+        <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex size-9 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
+              <ShieldCheck className="size-4" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-2xl font-semibold tracking-tight text-foreground">Calendar Operations</h1>
+                <Badge variant="secondary">Broker enforced</Badge>
+              </div>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
+                Coordinate planner proposals, confirmation queues, and auditable calendar writes from one workspace.
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2" aria-label="Broker decisions">
+            <Metric label="Applied" value={metrics.applied} tone="good" icon={<CheckCircle2 />} />
+            <Metric label="Needs confirmation" value={metrics.pending} tone="hold" icon={<Clock3 />} />
+            <Metric label="Rejected" value={metrics.rejected} tone="bad" icon={<XCircle />} />
+          </div>
         </div>
       </section>
 
-      <section className="workspace">
+      <section className="grid gap-4 xl:grid-cols-[minmax(680px,1fr)_340px]">
         <CalendarBoard
           events={displayedEvents}
           selectedId={selectedId}
@@ -289,91 +308,130 @@ export function App() {
           }}
         />
 
-        <aside className="panel">
-          <section className="card selected-card">
-            <p className="eyebrow">Selected block</p>
-            {selectedEvent ? (
-              <>
-                <h2>{selectedEvent.title}</h2>
-                <p>{formatRange(selectedEvent.start, selectedEvent.end)}</p>
-                <p className="muted">kind: {selectedEvent.kind} · etag: {selectedEvent.etag}</p>
-                <div className="quick-actions">
-                  <button onClick={() => void nudge(selectedEvent, -30)}>Earlier 30m</button>
-                  <button onClick={() => void nudge(selectedEvent, 30)}>Later 30m</button>
+        <aside className="grid content-start gap-4">
+          <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
+            <CardHeader className="pb-2">
+              <CardDescription>Selected block</CardDescription>
+              {selectedEvent ? <CardTitle className="text-base">{selectedEvent.title}</CardTitle> : null}
+            </CardHeader>
+            <CardContent>
+              {selectedEvent ? (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary">{selectedEvent.kind}</Badge>
+                    <span className="text-sm text-muted-foreground">{formatRange(selectedEvent.start, selectedEvent.end)}</span>
+                  </div>
+                  <p className="truncate text-xs text-muted-foreground">etag {selectedEvent.etag}</p>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="secondary" onClick={() => void nudge(selectedEvent, -30)}>
+                      Earlier 30m
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => void nudge(selectedEvent, 30)}>
+                      Later 30m
+                    </Button>
+                  </div>
                 </div>
-              </>
-            ) : (
-              <p>No event selected.</p>
-            )}
-          </section>
+              ) : (
+                <p className="text-sm text-muted-foreground">No event selected.</p>
+              )}
+            </CardContent>
+          </Card>
 
-          <section className="card">
-            <p className="eyebrow">Broker policy</p>
-            <ul className="policy-list">
-              <li>Owned focus/task/draft moves auto-apply with undo.</li>
-              <li>Meetings, deletes, attendee/location/description edits require confirmation.</li>
-              <li>Team calendars, non-owned events, and stale etags are rejected.</li>
-            </ul>
-          </section>
-
-          <section className="card">
-            <p className="eyebrow">Aspire resource commands</p>
-            <div className="command-grid">
-              <button onClick={() => void runCommand('/api/demo/reset', 'Calendar reset.')}>Reset user calendar</button>
-              <button onClick={() => void runCommand('/api/demo/trigger-replanning', 'Replanning intent queued.')}>Trigger replanning</button>
-              <button onClick={() => void runCommand('/api/demo/simulate-conflict', 'Stale etag conflict simulated.')}>Simulate conflict</button>
-              <button onClick={() => void runCommand('/api/demo/replay-last-drag', 'Last drag replayed.')}>Replay last drag</button>
-              <button onClick={() => void runCommand('/api/demo/clear-pending', 'Pending patches cleared.')}>Clear pending patches</button>
-              <button onClick={() => void runCommand('/api/undo', 'Last applied patch undone.')}>Undo broker write</button>
-              <button onClick={() => void runCommand('/api/demo/agent-session', 'Agent session inspected.')}>Inspect agent session</button>
-            </div>
-          </section>
+          <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
+            <CardHeader className="pb-2">
+              <CardDescription>Broker policy</CardDescription>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <ShieldCheck className="size-4 text-primary" />
+                Safe writes only
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ul className="space-y-2 text-sm leading-5 text-muted-foreground">
+                <li>Owned focus, task, and draft moves auto-apply with undo.</li>
+                <li>Meetings and attendee/location changes require confirmation.</li>
+                <li>Team calendars, non-owned events, and stale etags are rejected.</li>
+              </ul>
+            </CardContent>
+          </Card>
         </aside>
       </section>
 
-      <section className="lower-grid">
-        <section className="card">
-          <p className="eyebrow">Pending confirmations</p>
-          {pendingDecisions.length === 0 ? (
-            <p className="muted">Drag the meeting block to see a proposal held for confirmation.</p>
-          ) : (
-            pendingDecisions.map((decision) => (
-              <div className="decision" key={decision.id}>
-                <strong>{decision.policy}</strong>
-                <p>{decision.reason}</p>
-                <div>
-                  <button onClick={() => void confirm(decision)}>Approve</button>
-                  <button className="secondary" onClick={() => void reject(decision)}>Reject</button>
+      <section className="grid gap-4 xl:grid-cols-[0.9fr_1.2fr_1fr]">
+        <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
+          <CardHeader className="pb-2">
+            <CardDescription>Pending confirmations</CardDescription>
+            <CardTitle className="text-base">{pendingDecisions.length} held proposal{pendingDecisions.length === 1 ? '' : 's'}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {pendingDecisions.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Drag the meeting block to see a proposal held for confirmation.</p>
+            ) : (
+              <div className="space-y-2">
+                {pendingDecisions.map((decision) => (
+                  <div className="rounded-lg border border-amber-400/20 bg-amber-400/10 p-3" key={decision.id}>
+                    <div className="flex items-center justify-between gap-3">
+                      <strong className="text-sm text-amber-100">{decision.policy}</strong>
+                      <Badge variant="warning">needs review</Badge>
+                    </div>
+                    <p className="mt-2 text-sm leading-5 text-muted-foreground">{decision.reason}</p>
+                    <div className="mt-3 flex gap-2">
+                      <Button size="sm" onClick={() => void confirm(decision)}>
+                        Approve
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => void reject(decision)}>
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
+          <CardHeader className="pb-2">
+            <CardDescription>Audit trail</CardDescription>
+            <CardTitle className="text-base">Broker activity</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="max-h-72 space-y-2 overflow-auto pr-1">
+              {state.audit.slice(0, 9).map((entry) => (
+                <div className="grid grid-cols-[3.5rem_6rem_1fr] gap-3 rounded-lg border border-border/60 bg-background/35 p-2.5 text-sm" key={entry.id}>
+                  <span className="text-xs text-muted-foreground">{formatClock(entry.at)}</span>
+                  <strong className="truncate text-xs font-medium text-primary">{entry.actor}</strong>
+                  <p className="m-0 leading-5 text-muted-foreground">{entry.message}</p>
                 </div>
-              </div>
-            ))
-          )}
-        </section>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
 
-        <section className="card">
-          <p className="eyebrow">Audit trail</p>
-          <div className="audit-list">
-            {state.audit.slice(0, 9).map((entry) => (
-              <div className="audit" key={entry.id}>
-                <span>{formatClock(entry.at)}</span>
-                <strong>{entry.actor}</strong>
-                <p>{entry.message}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="card">
-          <p className="eyebrow">Agent runtime boundary</p>
-          <p className="muted">
-            ACA hosts stable services. Foundry hosted agents are modeled as planner execution sessions with per-user
-            and per-chat isolation keys; they still cannot write the calendar directly.
-          </p>
-          <pre>{JSON.stringify(agentSession ?? latestAgentSession(state), null, 2)}</pre>
-        </section>
+        <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
+          <CardHeader className="pb-2">
+            <CardDescription>Agent runtime boundary</CardDescription>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Bot className="size-4 text-primary" />
+              Planner isolation
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm leading-5 text-muted-foreground">
+              ACA hosts stable services. Foundry hosted agents run as isolated planner sessions and still cannot write
+              the calendar directly.
+            </p>
+            <pre className="mt-3 max-h-56 overflow-auto rounded-lg border border-border/60 bg-background/65 p-3 text-[11px] leading-5 text-muted-foreground">
+              {JSON.stringify(latestAgentSession(state), null, 2)}
+            </pre>
+          </CardContent>
+        </Card>
       </section>
 
-      {toast ? <div className="toast">{toast.message}</div> : null}
+      {toast ? (
+        <div className="fixed bottom-5 right-5 max-w-md rounded-lg border border-emerald-400/25 bg-emerald-950/90 px-4 py-3 text-sm text-emerald-50 shadow-lg shadow-black/30 backdrop-blur">
+          {toast.message}
+        </div>
+      ) : null}
     </main>
   );
 
@@ -407,33 +465,52 @@ function CalendarBoard(props: {
     : undefined;
 
   return (
-    <section className="calendar card">
-      <div className="calendar-head">
+    <Card className="overflow-hidden border-border/70 bg-card/70 shadow-sm backdrop-blur">
+      <CardHeader className="flex-row items-start justify-between space-y-0 pb-3">
         <div>
-          <p className="eyebrow">Calendar planner</p>
-          <h2>Drag blocks to create planning intents</h2>
+          <CardDescription>Calendar planner</CardDescription>
+          <CardTitle className="text-base">Drag blocks to create planning intents</CardTitle>
         </div>
-        <p className="muted">Primary calendar: {primaryCalendarId}</p>
-      </div>
-      <div className="timeline" style={{ height: (dayEndHour - dayStartHour) * 60 * pixelsPerMinute }}>
-        {Array.from({ length: dayEndHour - dayStartHour + 1 }, (_, index) => dayStartHour + index).map((hour) => (
-          <div className="hour-line" style={{ top: (hour - dayStartHour) * 60 * pixelsPerMinute }} key={hour}>
-            <span>{formatHour(hour)}</span>
-          </div>
-        ))}
-        {sorted.map((event) => (
-          <EventBlock
-            event={event.id === previewEvent?.id ? previewEvent : event}
-            key={event.id}
-            selected={props.selectedId === event.id}
-            dragging={props.drag?.event.id === event.id}
-            optimisticStatus={props.optimisticMoves[event.id]?.status}
-            onSelect={() => props.onSelect(event.id)}
-            onDragStart={(pointerOffsetMinutes, timelineTop) => props.onDragStart(event, pointerOffsetMinutes, timelineTop)}
-          />
-        ))}
-      </div>
-    </section>
+        <Badge variant="outline" className="hidden border-border/70 text-muted-foreground sm:inline-flex">
+          {primaryCalendarId}
+        </Badge>
+      </CardHeader>
+      <CardContent>
+        <div
+          className="relative overflow-hidden rounded-xl border border-border/60 bg-background/55"
+          data-timeline
+          style={{
+            height: (dayEndHour - dayStartHour) * 60 * pixelsPerMinute,
+            backgroundImage: 'linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px)',
+            backgroundPosition: '72px 0',
+            backgroundSize: 'calc((100% - 72px) / 5) 100%',
+          }}
+        >
+          {Array.from({ length: dayEndHour - dayStartHour + 1 }, (_, index) => dayStartHour + index).map((hour) => (
+            <div
+              className="absolute left-0 right-0 h-px bg-border/45"
+              style={{ top: (hour - dayStartHour) * 60 * pixelsPerMinute }}
+              key={hour}
+            >
+              <span className="absolute left-3 top-[-0.55rem] text-[11px] font-medium text-muted-foreground">
+                {formatHour(hour)}
+              </span>
+            </div>
+          ))}
+          {sorted.map((event) => (
+            <EventBlock
+              event={event.id === previewEvent?.id ? previewEvent : event}
+              key={event.id}
+              selected={props.selectedId === event.id}
+              dragging={props.drag?.event.id === event.id}
+              optimisticStatus={props.optimisticMoves[event.id]?.status}
+              onSelect={() => props.onSelect(event.id)}
+              onDragStart={(pointerOffsetMinutes, timelineTop) => props.onDragStart(event, pointerOffsetMinutes, timelineTop)}
+            />
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -446,38 +523,55 @@ function EventBlock(props: {
   onDragStart: (pointerOffsetMinutes: number, timelineTop: number) => void;
 }) {
   const top = (minutesFromStart(props.event.start) - dayStartHour * 60) * pixelsPerMinute;
-  const height = Math.max(minutesBetween(props.event.start, props.event.end) * pixelsPerMinute, 42);
+  const height = Math.max(minutesBetween(props.event.start, props.event.end) * pixelsPerMinute, 36);
+
   return (
     <button
-      className={`event ${props.event.kind} ${props.selected ? 'selected' : ''} ${props.dragging ? 'dragging' : ''} ${props.optimisticStatus ?? ''}`}
+      type="button"
+      className={cn(
+        'absolute left-[78px] flex w-[calc(100%-94px)] touch-none select-none flex-col items-start justify-center overflow-hidden rounded-lg border border-l-4 px-3 py-2 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        eventKindStyles[props.event.kind],
+        props.selected && 'ring-2 ring-ring/70',
+        props.dragging && 'z-10 opacity-85 shadow-lg',
+        props.optimisticStatus && optimisticStatusStyles[props.optimisticStatus],
+      )}
       style={{ top, height }}
       onClick={props.onSelect}
       onPointerDown={(event) => {
         event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
         const eventRect = event.currentTarget.getBoundingClientRect();
-        const timelineRect = event.currentTarget.closest('.timeline')?.getBoundingClientRect();
+        const timelineRect = event.currentTarget.closest('[data-timeline]')?.getBoundingClientRect();
         props.onDragStart((event.clientY - eventRect.top) / pixelsPerMinute, timelineRect?.top ?? eventRect.top);
       }}
     >
-      <strong>{props.event.title}</strong>
-      <span>{formatRange(props.event.start, props.event.end)}</span>
-      <small>
+      <strong className="truncate text-sm font-semibold">{props.event.title}</strong>
+      <span className="truncate text-xs text-current/70">{formatRange(props.event.start, props.event.end)}</span>
+      <small className="truncate text-[11px] text-current/60">
         {props.event.kind}
-        {props.event.attendees.length ? ` · ${props.event.attendees.length} attendees` : ''}
-        {props.optimisticStatus === 'planning' ? ' · planning' : ''}
-        {props.optimisticStatus === 'pending-confirmation' ? ' · pending confirmation' : ''}
+        {props.event.attendees.length ? ` - ${props.event.attendees.length} attendees` : ''}
+        {props.optimisticStatus === 'planning' ? ' - planning' : ''}
+        {props.optimisticStatus === 'pending-confirmation' ? ' - pending confirmation' : ''}
       </small>
     </button>
   );
 }
 
-function Metric(props: { label: string; value: number; tone: 'good' | 'hold' | 'bad' }) {
+function Metric(props: { label: string; value: number; tone: 'good' | 'hold' | 'bad'; icon: React.ReactNode }) {
+  const toneClass = {
+    good: 'text-emerald-300',
+    hold: 'text-amber-300',
+    bad: 'text-rose-300',
+  }[props.tone];
+
   return (
-    <div className={`metric ${props.tone}`}>
-      <strong>{props.value}</strong>
-      <span>{props.label}</span>
-    </div>
+    <Card className="min-w-28 border-border/70 bg-card/70 p-3 shadow-sm backdrop-blur">
+      <div className={cn('mb-2 flex items-center justify-between', toneClass)}>
+        {props.icon}
+        <strong className="text-2xl font-semibold leading-none">{props.value}</strong>
+      </div>
+      <span className="block text-xs leading-4 text-muted-foreground">{props.label}</span>
+    </Card>
   );
 }
 
