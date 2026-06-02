@@ -1,0 +1,10 @@
+scripts:
+- name: aspire start
+  command: aspire start --isolated
+- name: aspire stop
+  command: aspire stop
+  triggers:
+  - session.archive
+automation:
+  auto_issue_session: true
+  remote_control: false
