@@ -1,3 +1,4 @@
+import './otel';
 import { createServer } from 'node:http';
 import {
   type AppState,
@@ -18,7 +19,7 @@ import {
 const apiBaseUrl = withoutTrailingSlash(process.env.API_BASE_URL ?? 'http://localhost:4310');
 const plannerMode = process.env.PLANNER_MODE === 'foundry-hosted' ? 'foundry-hosted' : 'local';
 const workerId = `${plannerMode}-planner-${process.pid}`;
-const pollMs = Number(process.env.PLANNER_POLL_MS ?? 900);
+const pollMs = Number(process.env.PLANNER_POLL_MS ?? 2000);
 
 console.log(`[planner] ${workerId} using ${apiBaseUrl}`);
 console.log('[planner] Planner is not a calendar write authority; it emits CalendarPatch[] proposals.');

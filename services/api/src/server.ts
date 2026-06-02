@@ -1,3 +1,4 @@
+import './otel';
 import cors from 'cors';
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
 import {
