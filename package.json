@@ -1,0 +1,43 @@
+{
+  "name": "davidfowl-cautious-chainsaw",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
+  "scripts": {
+    "aspire:lint": "eslint apphost.mts",
+    "aspire:start": "aspire run",
+    "aspire:build": "tsc -p tsconfig.apphost.json",
+    "aspire:dev": "tsc --watch -p tsconfig.apphost.json",
+    "plain:api": "npm run dev --workspace @build2026/api",
+    "plain:planner": "npm run dev --workspace @build2026/planner",
+    "plain:web": "npm run dev --workspace @build2026/web",
+    "lint": "npm run aspire:lint && npm run typecheck --workspaces --if-present",
+    "predev": "npm run aspire:lint",
+    "dev": "npm run aspire:start",
+    "prebuild": "npm run aspire:lint",
+    "build": "npm run aspire:build && npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "watch": "npm run aspire:dev"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "vite": "^7.2.6",
+    "vscode-jsonrpc": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "eslint": "^10.0.3",
+    "nodemon": "^3.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.57.1"
+  }
+}
