@@ -694,7 +694,11 @@ export class CalendarStore {
     const latestJob = state.readinessJobs.find((job) => job.sessionId === session.sessionId) ?? state.readinessJobs[0] ?? null;
     const hosted = state.proposals.find((proposal) => proposal.hostedAgentSession)?.hostedAgentSession;
     return {
-      runtime: process.env.PLANNER_MODE === 'foundry-hosted' ? 'foundry-hosted' : 'local',
+      runtime: process.env.PLANNER_MODE === 'foundry-hosted'
+        ? 'foundry-hosted'
+        : process.env.PLANNER_MODE === 'copilot-sdk'
+          ? 'copilot-sdk'
+          : 'local',
       browserSession: session,
       latestReadinessJob: latestJob,
       hostedAgentSession: hosted ?? null,

@@ -2,6 +2,9 @@ import './otel';
 import { createServer } from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
+import type { CopilotSession, ProviderConfig } from '@github/copilot-sdk';
 import { z } from 'zod';
 import {
   type AppState,
@@ -26,12 +29,25 @@ import {
 } from './shared';
 
 const apiBaseUrl = withoutTrailingSlash(process.env.API_BASE_URL ?? 'http://localhost:4310');
-const plannerMode = process.env.PLANNER_MODE === 'foundry-hosted' ? 'foundry-hosted' : 'local';
+type PlannerMode = 'local' | 'foundry-hosted' | 'copilot-sdk';
+
+const plannerMode: PlannerMode = process.env.PLANNER_MODE === 'foundry-hosted'
+  ? 'foundry-hosted'
+  : process.env.PLANNER_MODE === 'copilot-sdk'
+    ? 'copilot-sdk'
+    : 'local';
 const plannerRole = process.env.PLANNER_ROLE === 'agent' ? 'agent' : 'worker';
 const workerId = `${plannerMode}-planner-${process.pid}`;
 const pollMs = Number(process.env.PLANNER_POLL_MS ?? 2000);
 const toolDelayMs = Number(process.env.READINESS_TOOL_DELAY_MS ?? 750);
 const hostedAgentSessions = new Map<string, string>();
+const copilotHome = path.join(os.tmpdir(), '.build2026-copilot-sdk-planner');
+const copilotSessions = new Map<string, CopilotSession>();
+const copilotSessionLocks = new Map<string, Promise<void>>();
+let cachedFoundryToken: { token: string; expiresOnTimestamp: number } | undefined;
+let copilotClient: { start(): Promise<void>; createSession(options: unknown): Promise<CopilotSession>; resumeSession(sessionId: string, options: unknown): Promise<CopilotSession> } | undefined;
+let cachedProviderConfig: ProviderConfig | undefined;
+let providerTokenExpiresOn = 0;
 
 const calendarWindowSchema = z.object({
   start: z.string(),
@@ -70,6 +86,9 @@ type MeetingMaterials = z.infer<typeof materialsSchema>;
 
 console.log(`[planner] ${workerId} role=${plannerRole} mode=${plannerMode} using ${apiBaseUrl}`);
 console.log('[planner] Planner is not a calendar write authority; it emits CalendarPatch[] proposals and readiness suggestions.');
+if (plannerMode === 'copilot-sdk') {
+  logCopilotEnvironment();
+}
 
 if (plannerRole === 'agent') {
   await startHostedAgentServer();
@@ -226,6 +245,14 @@ async function runReadinessAnalysis(job: MeetingReadinessJob): Promise<void> {
     if (!(await recordProgress(job.id, 'agent-result', 'Received hosted-agent result', `Validated ${suggestions.length} readiness suggestion(s) from the hosted agent.`))) {
       return;
     }
+  } else if (plannerMode === 'copilot-sdk') {
+    if (!(await recordProgress(job.id, 'copilot-sdk', 'Invoking Copilot SDK', 'Sent the scoped meeting context to the Copilot SDK with the Foundry model provider.'))) {
+      return;
+    }
+    suggestions = await invokeCopilotSdk(context);
+    if (!(await recordProgress(job.id, 'agent-result', 'Received Copilot SDK result', `Validated ${suggestions.length} readiness suggestion(s) from model inference.`))) {
+      return;
+    }
   } else {
     if (!(await recordProgress(job.id, 'scoring', 'Scoring readiness suggestions', 'Ranked prep time, weather, travel, and agenda/materials recommendations.'))) {
       return;
@@ -380,6 +407,267 @@ async function invokeHostedAgent(context: HostedAgentContext): Promise<Readiness
   throw new Error('Hosted agent invocation did not complete.');
 }
 
+async function invokeCopilotSdk(context: HostedAgentContext): Promise<ReadinessSuggestion[]> {
+  const sessionId = stableAgentSessionId(context.job);
+  return withCopilotSessionLock(sessionId, async () => {
+    const startedAt = Date.now();
+    try {
+      const session = await getCopilotSession(sessionId);
+      const prompt = buildCopilotReadinessPrompt(context);
+      console.log(`[planner] Copilot SDK send start job=${context.job.id} session=${sessionId} promptBytes=${Buffer.byteLength(prompt, 'utf8')}.`);
+      const response = await session.sendAndWait({ prompt }, 90_000);
+      const content = response?.data?.content;
+      console.log(`[planner] Copilot SDK send completed job=${context.job.id} durationMs=${Date.now() - startedAt} contentBytes=${typeof content === 'string' ? Buffer.byteLength(content, 'utf8') : 0}.`);
+      if (typeof content !== 'string' || !content.trim()) {
+        throw new Error('Copilot SDK completed without an assistant text response.');
+      }
+
+      const suggestions = parseCopilotSuggestions(content);
+      console.log(`[planner] Copilot SDK returned job=${context.job.id} suggestions=${suggestions.length}: ${suggestionTitles(suggestions)}`);
+      return suggestions;
+    } catch (error) {
+      console.error(`[planner] Copilot SDK inference failed job=${context.job.id} durationMs=${Date.now() - startedAt}:`, error);
+      throw error;
+    }
+  });
+}
+
+async function getCopilotSession(sessionId: string): Promise<CopilotSession> {
+  const cached = copilotSessions.get(sessionId);
+  if (cached && cachedProviderConfig && Date.now() < providerTokenExpiresOn - 5 * 60 * 1000) {
+    return cached;
+  }
+
+  const copilot = await ensureCopilotClient();
+  const provider = await ensureProviderConfig();
+  const config = {
+    model: copilotModelId(),
+    provider,
+    availableTools: [],
+    onPermissionRequest: (await import('@github/copilot-sdk')).approveAll,
+    systemMessage: {
+      mode: 'append',
+      content: [
+        'You are the meeting readiness agent for an Aspire Build 2026 demo.',
+        'Return only JSON. Do not include markdown fences or prose.',
+        'The calendar broker is the only write authority. You may propose CalendarPatch objects, but never claim that you applied changes.',
+      ].join('\n'),
+    },
+  };
+
+  try {
+    console.log(`[planner] Copilot SDK resuming session ${sessionId}.`);
+    const resumed = await copilot.resumeSession(sessionId, config);
+    copilotSessions.set(sessionId, resumed);
+    console.log(`[planner] Copilot SDK resumed session ${sessionId}.`);
+    return resumed;
+  } catch (error) {
+    console.log(`[planner] Copilot SDK creating session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    const created = await copilot.createSession({ ...config, sessionId });
+    copilotSessions.set(sessionId, created);
+    console.log(`[planner] Copilot SDK created session ${sessionId}.`);
+    return created;
+  }
+}
+
+async function ensureCopilotClient(): Promise<NonNullable<typeof copilotClient>> {
+  if (copilotClient) {
+    return copilotClient;
+  }
+
+  const { CopilotClient } = await import('@github/copilot-sdk');
+  console.log(`[planner] Starting Copilot SDK client home=${copilotHome}.`);
+  copilotClient = new CopilotClient({
+    mode: 'empty',
+    useLoggedInUser: false,
+    baseDirectory: copilotHome,
+    workingDirectory: os.tmpdir(),
+    logLevel: copilotLogLevel(),
+  });
+  await copilotClient.start();
+  console.log('[planner] Copilot SDK client started.');
+  return copilotClient;
+}
+
+async function ensureProviderConfig(): Promise<ProviderConfig> {
+  if (cachedProviderConfig && Date.now() < providerTokenExpiresOn - 5 * 60 * 1000) {
+    return cachedProviderConfig;
+  }
+
+  const { DefaultAzureCredential } = await import('@azure/identity');
+  console.log('[planner] Acquiring Azure AI Foundry token for Copilot SDK provider.');
+  const token = await new DefaultAzureCredential().getToken('https://ai.azure.com/.default');
+  providerTokenExpiresOn = token.expiresOnTimestamp;
+  cachedProviderConfig = {
+    type: 'openai',
+    wireApi: 'completions',
+    baseUrl: deriveFoundryProjectEndpoint(),
+    bearerToken: token.token,
+    modelId: copilotModelId(),
+    wireModel: foundryDeploymentName(),
+  };
+  copilotSessions.clear();
+  console.log(`[planner] Configured Copilot SDK Foundry provider baseUrl=${cachedProviderConfig.baseUrl} model=${copilotModelId()} deployment=${foundryDeploymentName()} tokenExpires=${new Date(providerTokenExpiresOn).toISOString()}.`);
+  return cachedProviderConfig;
+}
+
+function buildCopilotReadinessPrompt(context: HostedAgentContext): string {
+  return JSON.stringify({
+    task: 'Analyze meeting readiness and return JSON shaped exactly as { "suggestions": ReadinessSuggestion[] }.',
+    rules: [
+      'Return 2-4 suggestions.',
+      'Valid suggestion kind values are prep-time, weather-attire, travel-buffer, agenda-materials.',
+      'Use proposedPatch only for user-visible calendar changes.',
+      'Every proposedPatch must include operation=create, intentId, changes, reason, and confidence between 0 and 1.',
+      'Use the provided ids. suggestion.id and patch.id must be non-empty strings.',
+      'Do not include markdown, comments, or extra text outside the JSON object.',
+    ],
+    ids: {
+      jobId: context.job.id,
+      prepSuggestionId: id('suggestion'),
+      prepPatchId: id('patch'),
+      travelSuggestionId: id('suggestion'),
+      travelPatchId: id('patch'),
+      weatherSuggestionId: id('suggestion'),
+      materialsSuggestionId: id('suggestion'),
+    },
+    context,
+    example: {
+      suggestions: createReadinessSuggestions(
+        context.job,
+        context.meeting,
+        context.calendarWindow,
+        context.weather,
+        context.travel,
+        context.materials,
+      ),
+    },
+  });
+}
+
+function parseCopilotSuggestions(content: string): ReadinessSuggestion[] {
+  const json = extractJsonObject(content);
+  try {
+    const payload = JSON.parse(json) as unknown;
+    return z.object({ suggestions: z.array(readinessSuggestionSchema).min(1) }).parse(payload).suggestions;
+  } catch (error) {
+    console.error(`[planner] Failed to parse Copilot SDK JSON. rawPreview=${previewForLog(content)} jsonPreview=${previewForLog(json)}`);
+    throw error;
+  }
+}
+
+function extractJsonObject(content: string): string {
+  const trimmed = content.trim();
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
+  if (fenced) {
+    return fenced[1].trim();
+  }
+
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    return trimmed.slice(start, end + 1);
+  }
+
+  return trimmed;
+}
+
+function parseConnectionString(value: string | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!value) {
+    return result;
+  }
+
+  for (const part of value.split(';')) {
+    const index = part.indexOf('=');
+    if (index > 0) {
+      result[part.slice(0, index).trim().toLowerCase()] = part.slice(index + 1).trim();
+    }
+  }
+  return result;
+}
+
+function deriveFoundryProjectEndpoint(): string {
+  const explicit = process.env.FOUNDRY_PROJECT_ENDPOINT ?? process.env.COPILOT_PROVIDER_BASE_URL;
+  if (explicit) {
+    return normalizeFoundryEndpoint(explicit);
+  }
+
+  const connection = parseConnectionString(process.env.ConnectionStrings__chat);
+  const serviceEndpoint = process.env.CHAT_URI
+    ?? process.env.CHAT_AIINFERENCEURI
+    ?? connection.endpointaiinference;
+  if (!serviceEndpoint) {
+    throw new Error('PLANNER_MODE=copilot-sdk requires a Foundry model reference. Expected FOUNDRY_PROJECT_ENDPOINT or CHAT_URI/CHAT_AIINFERENCEURI from withReference(chat).');
+  }
+
+  const normalized = normalizeFoundryEndpoint(serviceEndpoint);
+  if (normalized.includes('/api/projects/')) {
+    return normalized;
+  }
+
+  const base = normalized.replace(/\/models$/i, '');
+  const projectName = process.env.FOUNDRY_PROJECT_NAME ?? 'calendarplanning';
+  return `${base}/api/projects/${encodeURIComponent(projectName)}/openai/v1`;
+}
+
+function normalizeFoundryEndpoint(endpoint: string): string {
+  const base = withoutTrailingSlash(endpoint);
+  if (base.includes('/api/projects/') && !base.endsWith('/openai/v1')) {
+    return `${base}/openai/v1`;
+  }
+  return base;
+}
+
+function foundryDeploymentName(): string {
+  const connection = parseConnectionString(process.env.ConnectionStrings__chat);
+  return process.env.CHAT_MODELNAME ?? connection.deployment ?? 'chat';
+}
+
+function copilotModelId(): string {
+  return process.env.COPILOT_MODEL_ID ?? foundryDeploymentName();
+}
+
+function copilotLogLevel(): 'none' | 'error' | 'warning' | 'info' | 'debug' | 'all' {
+  const value = process.env.COPILOT_LOG_LEVEL;
+  return value === 'none' || value === 'error' || value === 'warning' || value === 'info' || value === 'debug' || value === 'all'
+    ? value
+    : 'info';
+}
+
+function logCopilotEnvironment(): void {
+  const connection = parseConnectionString(process.env.ConnectionStrings__chat);
+  const keys = Object.keys(connection).sort();
+  console.log(`[planner] Copilot SDK env: CHAT_URI=${present(process.env.CHAT_URI)} CHAT_AIINFERENCEURI=${present(process.env.CHAT_AIINFERENCEURI)} CHAT_MODELNAME=${process.env.CHAT_MODELNAME ?? '<unset>'} ConnectionStrings__chat=${present(process.env.ConnectionStrings__chat)} connectionKeys=${keys.join(',') || '<none>'} FOUNDRY_PROJECT_NAME=${process.env.FOUNDRY_PROJECT_NAME ?? '<unset>'} COPILOT_MODEL_ID=${process.env.COPILOT_MODEL_ID ?? '<unset>'}.`);
+}
+
+function present(value: string | undefined): 'set' | 'unset' {
+  return value ? 'set' : 'unset';
+}
+
+function previewForLog(value: string): string {
+  return JSON.stringify(value.slice(0, 800));
+}
+
+async function withCopilotSessionLock<T>(sessionId: string, callback: () => Promise<T>): Promise<T> {
+  const prior = copilotSessionLocks.get(sessionId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = prior.then(() => current);
+  copilotSessionLocks.set(sessionId, tail);
+  await prior;
+  try {
+    return await callback();
+  } finally {
+    release();
+    if (copilotSessionLocks.get(sessionId) === tail) {
+      copilotSessionLocks.delete(sessionId);
+    }
+  }
+}
+
 function suggestionTitles(suggestions: ReadinessSuggestion[]): string {
   return suggestions.map((suggestion) => `"${suggestion.title}"`).join(', ');
 }
@@ -419,8 +707,6 @@ function buildInvocationUrl(endpoint: string, agentSessionId: string | undefined
   }
   return url.toString();
 }
-
-let cachedFoundryToken: { token: string; expiresOnTimestamp: number } | undefined;
 
 async function hostedAgentAuthHeaders(invocationUrl: string): Promise<Record<string, string>> {
   const url = new URL(invocationUrl);
@@ -556,7 +842,11 @@ function createProposal(intent: PlanningIntent, event: CalendarEvent, state: App
     id: id('proposal'),
     intentId: intent.id,
     createdAt: new Date().toISOString(),
-    createdBy: plannerMode === 'foundry-hosted' ? 'foundry-hosted-agent' : 'local-planner-worker',
+    createdBy: plannerMode === 'foundry-hosted'
+      ? 'foundry-hosted-agent'
+      : plannerMode === 'copilot-sdk'
+        ? 'copilot-sdk-planner'
+        : 'local-planner-worker',
     plannerMode,
     patches,
     hostedAgentSession: plannerMode === 'foundry-hosted' ? hostedAgentSession(intent, event, patches) : undefined,
