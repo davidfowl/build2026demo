@@ -5,7 +5,7 @@ export const demoSessionId = 'chat-build-2026';
 export const primaryCalendarId = 'cal-alex-primary';
 export const teamCalendarId = 'cal-team-launch';
 
-export const eventKindSchema = z.enum(['focus', 'task', 'draft', 'meeting', 'team']);
+export const eventKindSchema = z.enum(['focus', 'task', 'draft', 'meeting', 'team', 'prep']);
 export type EventKind = z.infer<typeof eventKindSchema>;
 
 export const calendarEventSchema = z.object({
@@ -52,6 +52,7 @@ export const calendarPatchSchema = z.object({
     start: z.string().optional(),
     end: z.string().optional(),
     calendarId: z.string().optional(),
+    kind: eventKindSchema.optional(),
     attendees: z.array(z.string()).optional(),
     location: z.string().optional(),
     description: z.string().optional(),
@@ -79,6 +80,45 @@ export const proposalSchema = z.object({
     .optional(),
 });
 export type PatchProposal = z.infer<typeof proposalSchema>;
+
+export const readinessSuggestionKindSchema = z.enum(['prep-time', 'weather-attire', 'travel-buffer', 'agenda-materials']);
+export type ReadinessSuggestionKind = z.infer<typeof readinessSuggestionKindSchema>;
+
+export const readinessStepSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  detail: z.string(),
+  completedAt: z.string(),
+});
+export type ReadinessStep = z.infer<typeof readinessStepSchema>;
+
+export const readinessSuggestionSchema = z.object({
+  id: z.string(),
+  kind: readinessSuggestionKindSchema,
+  title: z.string(),
+  detail: z.string(),
+  rationale: z.string().optional(),
+  proposedPatch: calendarPatchSchema.optional(),
+  decisionId: z.string().optional(),
+});
+export type ReadinessSuggestion = z.infer<typeof readinessSuggestionSchema>;
+
+export const meetingReadinessJobSchema = z.object({
+  id: z.string(),
+  userId: z.string(),
+  sessionId: z.string(),
+  meetingId: z.string(),
+  status: z.enum(['queued', 'running', 'completed', 'failed', 'canceled']),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  createdBy: z.string(),
+  workerId: z.string().optional(),
+  currentStep: z.string().optional(),
+  completedSteps: z.array(readinessStepSchema).default([]),
+  suggestions: z.array(readinessSuggestionSchema).default([]),
+  error: z.string().optional(),
+});
+export type MeetingReadinessJob = z.infer<typeof meetingReadinessJobSchema>;
 
 export const brokerDecisionSchema = z.object({
   id: z.string(),
@@ -115,6 +155,7 @@ export const appStateSchema = z.object({
   intents: z.array(intentSchema),
   proposals: z.array(proposalSchema),
   decisions: z.array(brokerDecisionSchema),
+  readinessJobs: z.array(meetingReadinessJobSchema).default([]),
   audit: z.array(auditEntrySchema),
   lastDragIntentId: z.string().optional(),
 });
@@ -135,6 +176,60 @@ export const submitProposalRequestSchema = z.object({
 });
 export type SubmitProposalRequest = z.infer<typeof submitProposalRequestSchema>;
 
+export const createReadinessJobRequestSchema = z.object({
+  userId: z.string().default(demoUserId),
+  sessionId: z.string().default(demoSessionId),
+});
+export type CreateReadinessJobRequest = z.infer<typeof createReadinessJobRequestSchema>;
+
+const isoDateTimeSchema = z.string().refine((value) => !Number.isNaN(Date.parse(value)), {
+  message: 'Expected an ISO date/time value.',
+});
+
+export const bookMeetingRequestSchema = z.object({
+  userId: z.string().default(demoUserId),
+  sessionId: z.string().default(demoSessionId),
+  title: z.string().trim().min(1).max(140),
+  start: isoDateTimeSchema,
+  end: isoDateTimeSchema,
+  attendees: z.array(z.string().trim().min(1)).default([]),
+  location: z.string().trim().min(1).optional(),
+  description: z.string().trim().min(1).optional(),
+}).superRefine((request, context) => {
+  if (Date.parse(request.end) <= Date.parse(request.start)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['end'],
+      message: 'Meeting end must be after start.',
+    });
+  }
+});
+export type BookMeetingRequest = z.infer<typeof bookMeetingRequestSchema>;
+
+export const deleteEventRequestSchema = z.object({
+  userId: z.string().default(demoUserId),
+  sessionId: z.string().default(demoSessionId),
+  confirmed: z.boolean().default(false),
+});
+export type DeleteEventRequest = z.infer<typeof deleteEventRequestSchema>;
+
+export const readinessProgressRequestSchema = z.object({
+  stepId: z.string(),
+  label: z.string(),
+  detail: z.string(),
+});
+export type ReadinessProgressRequest = z.infer<typeof readinessProgressRequestSchema>;
+
+export const readinessResultRequestSchema = z.object({
+  suggestions: z.array(readinessSuggestionSchema),
+});
+export type ReadinessResultRequest = z.infer<typeof readinessResultRequestSchema>;
+
+export const readinessFailureRequestSchema = z.object({
+  error: z.string(),
+});
+export type ReadinessFailureRequest = z.infer<typeof readinessFailureRequestSchema>;
+
 export const policyDecisionKindSchema = z.enum(['auto-apply', 'confirm', 'reject']);
 export type PolicyDecisionKind = z.infer<typeof policyDecisionKindSchema>;
 
@@ -148,8 +243,9 @@ export type PolicyEvaluation = {
 export function createSeedState(now = new Date('2026-06-02T09:00:00-07:00')): AppState {
   const day = new Date(now);
   day.setHours(0, 0, 0, 0);
-  const at = (hour: number, minute = 0) => {
+  const at = (dayOffset: number, hour: number, minute = 0) => {
     const d = new Date(day);
+    d.setDate(day.getDate() + dayOffset);
     d.setHours(hour, minute, 0, 0);
     return d.toISOString();
   };
@@ -160,21 +256,36 @@ export function createSeedState(now = new Date('2026-06-02T09:00:00-07:00')): Ap
     userId: demoUserId,
     sessionId: demoSessionId,
     events: [
-      event('focus-1', primaryCalendarId, demoUserId, 'Write Aspire agents intro', 'focus', at(9), at(10, 30)),
-      event('meeting-1', primaryCalendarId, demoUserId, 'Build keynote sync', 'meeting', at(11), at(12), {
+      event('focus-1', primaryCalendarId, demoUserId, 'Write Aspire agents intro', 'focus', at(0, 9), at(0, 10, 30)),
+      event('meeting-1', primaryCalendarId, demoUserId, 'Build keynote sync', 'meeting', at(0, 11), at(0, 12), {
         attendees: ['nikki@example.com', 'scott@example.com'],
         location: 'Teams',
       }),
-      event('task-1', primaryCalendarId, demoUserId, 'Polish calendar drag demo', 'task', at(13), at(14)),
-      event('draft-1', primaryCalendarId, demoUserId, 'Draft follow-up email', 'draft', at(15), at(15, 30)),
-      event('team-1', teamCalendarId, 'team-build', 'Shared booth coverage', 'team', at(14), at(15), {
+      event('task-1', primaryCalendarId, demoUserId, 'Polish calendar drag demo', 'task', at(0, 13), at(0, 14)),
+      event('draft-1', primaryCalendarId, demoUserId, 'Draft follow-up email', 'draft', at(0, 15), at(0, 15, 30)),
+      event('focus-2', primaryCalendarId, demoUserId, 'Review customer feedback notes', 'focus', at(1, 9, 30), at(1, 10, 30)),
+      event('meeting-2', primaryCalendarId, demoUserId, 'Design critique', 'meeting', at(1, 13), at(1, 14), {
+        attendees: ['maya@example.com'],
+        location: 'Teams',
+      }),
+      event('task-2', primaryCalendarId, demoUserId, 'Tighten readiness cards', 'task', at(2, 9), at(2, 10)),
+      event('focus-3', primaryCalendarId, demoUserId, 'Demo rehearsal block', 'focus', at(2, 11), at(2, 12)),
+      event('meeting-demo-review', primaryCalendarId, demoUserId, 'Build 2026 demo readiness review', 'meeting', at(3, 15), at(3, 16), {
+        attendees: ['nikki@example.com', 'scott@example.com', 'maya@example.com'],
+        location: 'Microsoft Reactor - Seattle',
+        description: 'Review the Aspire agent demo story, readiness cards, and broker safety boundary.',
+      }),
+      event('team-1', teamCalendarId, 'team-build', 'Shared booth coverage', 'team', at(3, 13), at(3, 14), {
         attendees: ['team@example.com'],
         location: 'Expo hall',
       }),
+      event('focus-4', primaryCalendarId, demoUserId, 'Build 2026 slide polish', 'focus', at(4, 10), at(4, 11, 30)),
+      event('task-3', primaryCalendarId, demoUserId, 'Pack demo kit', 'task', at(5, 14), at(5, 14, 45)),
     ],
     intents: [],
     proposals: [],
     decisions: [],
+    readinessJobs: [],
     audit: [
       {
         id: id('audit'),
