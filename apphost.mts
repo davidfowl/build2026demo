@@ -16,9 +16,10 @@ const chat = foundryProject ? await foundryProject.addModelDeployment('chat', Fo
 if (foundryProject && chat) {
     await foundryProject.addPromptAgent('calendar-policy-planner', chat, {
         instructions: `
-You are the calendar planning agent for an Aspire Build 2026 demo.
-Return structured CalendarPatch proposals only.
-Never call calendar write APIs.
+You are the meeting readiness agent for an Aspire Build 2026 demo.
+Use app-provided tools to analyze prep time, weather/attire, travel buffer, and agenda/materials.
+Return readiness suggestions. Include structured CalendarPatch proposals only for user-visible calendar suggestions.
+Never call calendar write APIs directly.
 The calendar broker validates ownership, permissions, stale etags, and confirmation policy.
 `.trim(),
     });
@@ -42,49 +43,40 @@ const api = await builder
         endpointName: 'http',
         resultMode: HttpCommandResultMode.Json,
     })
+    .withHttpCommand('/api/demo/generate-build-week', 'Generate Build week calendar', {
+        commandName: 'generate-build-week-calendar',
+        description: 'Replace the calendar with a believable randomized Build-themed week.',
+        confirmationMessage: 'Replace the current calendar with a generated Build-themed week?',
+        iconName: 'Calendar',
+        isHighlighted: true,
+        methodName: 'POST',
+        endpointName: 'http',
+        resultMode: HttpCommandResultMode.Json,
+    })
+    .withHttpCommand('/api/demo/clear-events', 'Clear calendar events', {
+        commandName: 'clear-calendar-events',
+        description: 'Remove all calendar events and clear readiness/proposal state.',
+        confirmationMessage: 'Clear all calendar events and agent state?',
+        iconName: 'Delete',
+        isHighlighted: true,
+        methodName: 'POST',
+        endpointName: 'http',
+        resultMode: HttpCommandResultMode.Json,
+    })
+    .withHttpCommand('/api/demo/trigger-readiness', 'Trigger meeting readiness', {
+        commandName: 'trigger-meeting-readiness',
+        description: 'Queue the long-running meeting readiness agent for the seeded Build 2026 review.',
+        iconName: 'Bot',
+        isHighlighted: true,
+        methodName: 'POST',
+        endpointName: 'http',
+        resultMode: HttpCommandResultMode.Json,
+    })
     .withHttpCommand('/api/demo/simulate-conflict', 'Simulate stale etag conflict', {
         commandName: 'simulate-calendar-conflict',
-        description: 'Create a stale-etag patch so the broker rejects the agent proposal.',
+        description: 'Optional safety-boundary proof: create a stale-etag patch so the broker rejects it.',
         confirmationMessage: 'Create a stale proposal and reject it through broker policy?',
         iconName: 'Warning',
-        isHighlighted: true,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
-    })
-    .withHttpCommand('/api/demo/trigger-replanning', 'Trigger replanning', {
-        commandName: 'trigger-replanning',
-        description: 'Queue a planning intent for the background planner.',
-        iconName: 'Play',
-        isHighlighted: true,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
-    })
-    .withHttpCommand('/api/demo/replay-last-drag', 'Replay last drag', {
-        commandName: 'replay-last-drag',
-        description: 'Replay the last UI drag as a new planning intent.',
-        iconName: 'Replay',
-        isHighlighted: false,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
-    })
-    .withHttpCommand('/api/demo/clear-pending', 'Clear pending agent patches', {
-        commandName: 'clear-pending-agent-patches',
-        description: 'Reject all pending confirmation decisions for a clean demo reset.',
-        confirmationMessage: 'Reject all pending agent patches?',
-        iconName: 'Dismiss',
-        isHighlighted: false,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
-    })
-    .withHttpCommand('/api/demo/reset', 'Reset user calendar', {
-        commandName: 'reset-user-calendar',
-        description: 'Reset the current user calendar and audit trail.',
-        confirmationMessage: 'Reset the demo calendar state?',
-        iconName: 'ArrowReset',
         isHighlighted: false,
         methodName: 'POST',
         endpointName: 'http',
@@ -115,7 +107,7 @@ if (foundryProject && chat) {
         .withReference(foundryProject)
         .withReference(chat)
         .asHostedAgent(foundryProject, {
-            description: 'Calendar planner hosted-agent runtime. Emits CalendarPatch proposals; the broker owns calendar writes.',
+            description: 'Meeting readiness hosted-agent runtime. Emits suggestions and broker-reviewed CalendarPatch proposals.',
             cpu: 0.5,
             memory: 1,
             metadata: {

@@ -5,11 +5,17 @@ import type { Pool as PgPool, PoolClient, PoolConfig } from 'pg';
 import {
   type AppState,
   type AuditEntry,
+  type BookMeetingRequest,
   type BrokerDecision,
   type CalendarEvent,
   type CalendarPatch,
+  type DeleteEventRequest,
+  type EventKind,
+  type MeetingReadinessJob,
   type PatchProposal,
   type PlanningIntent,
+  type ReadinessStep,
+  type ReadinessSuggestion,
   appStateSchema,
   createSeedState,
   demoSessionId,
@@ -19,6 +25,7 @@ import {
   makeEtag,
   nextEtag,
   primaryCalendarId,
+  teamCalendarId,
 } from '@build2026/shared';
 
 const { Pool } = pg;
@@ -104,6 +111,27 @@ export class CalendarStore {
     return seed;
   }
 
+  async generateBuildWeekCalendar(): Promise<AppState> {
+    return this.update((state) => {
+      const events = createBuildWeekEvents();
+      state.events = events;
+      clearTransientAgentState(state);
+      state.audit = [
+        audit('demo-command', 'generate-build-week-calendar', `Generated ${events.length} Build-themed calendar event(s).`),
+      ];
+    });
+  }
+
+  async clearCalendarEvents(): Promise<AppState> {
+    return this.update((state) => {
+      state.events = [];
+      clearTransientAgentState(state);
+      state.audit = [
+        audit('demo-command', 'clear-calendar-events', 'Cleared all calendar events and agent state.'),
+      ];
+    });
+  }
+
   async update(mutator: (state: AppState) => void): Promise<AppState> {
     if (this.mode === 'postgres') {
       return this.updatePostgres(mutator);
@@ -153,6 +181,112 @@ export class CalendarStore {
     return must(created, 'Intent was not created.');
   }
 
+  async bookMeeting(request: BookMeetingRequest): Promise<{ event: CalendarEvent; decision: BrokerDecision; job: MeetingReadinessJob }> {
+    let result: { event: CalendarEvent; decision: BrokerDecision; job: MeetingReadinessJob } | undefined;
+    await this.update((state) => {
+      const meetingId = id('meeting');
+      const proposalId = id('proposal');
+      const patch: CalendarPatch = {
+        id: id('patch'),
+        intentId: proposalId,
+        operation: 'create',
+        eventId: meetingId,
+        changes: {
+          title: request.title,
+          kind: 'meeting',
+          calendarId: primaryCalendarId,
+          start: request.start,
+          end: request.end,
+          attendees: request.attendees,
+          location: request.location,
+          description: request.description,
+        },
+        reason: `Book "${request.title}" from the meeting creation form.`,
+        confidence: 1,
+      };
+      const proposal: PatchProposal = {
+        id: proposalId,
+        intentId: proposalId,
+        createdAt: new Date().toISOString(),
+        createdBy: 'user',
+        plannerMode: 'local',
+        patches: [patch],
+      };
+
+      state.proposals.unshift(proposal);
+      state.audit.unshift(audit('user', 'meeting-booking-submitted', `Submitted "${request.title}" to the broker for booking.`));
+      const decision = evaluateAndMaybeApply(state, proposal, patch, true, {
+        policy: 'user-booked-meeting',
+        reason: 'User submitted the meeting booking form; broker validated and applied the create patch.',
+      });
+      const event = must(findEvent(state, meetingId), `Booked meeting ${meetingId} was not found after broker apply.`);
+      const job = queueReadinessJob(state, {
+        userId: request.userId,
+        sessionId: request.sessionId,
+        meetingId,
+        createdBy: 'meeting-booking',
+      }, event);
+
+      result = {
+        event: cloneEvent(event),
+        decision: { ...decision },
+        job: cloneReadinessJob(job),
+      };
+    });
+
+    return must(result, 'Meeting was not booked.');
+  }
+
+  async requestDeleteEvent(eventId: string, request: DeleteEventRequest): Promise<BrokerDecision> {
+    let requested: BrokerDecision | undefined;
+    await this.update((state) => {
+      const event = findEvent(state, eventId);
+      if (!event) {
+        throw new BrokerError(404, `Event ${eventId} was not found.`);
+      }
+
+      const proposalId = id('proposal');
+      const patch: CalendarPatch = {
+        id: id('patch'),
+        intentId: proposalId,
+        operation: 'delete',
+        eventId: event.id,
+        baseEtag: event.etag,
+        changes: {},
+        reason: `Delete "${event.title}" from the calendar.`,
+        confidence: 1,
+      };
+      const proposal: PatchProposal = {
+        id: proposalId,
+        intentId: proposalId,
+        createdAt: new Date().toISOString(),
+        createdBy: 'user',
+        plannerMode: 'local',
+        patches: [patch],
+      };
+
+      state.proposals.unshift(proposal);
+      state.audit.unshift(audit('user', 'delete-requested', `Requested deletion of "${event.title}".`, patch.id, event.id));
+      requested = evaluateAndMaybeApply(state, proposal, patch, request.confirmed, request.confirmed
+        ? {
+          policy: 'user-confirmed-delete',
+          reason: 'User confirmed the delete action in the calendar UI; broker validated and applied the delete patch.',
+        }
+        : undefined);
+      if (requested.status === 'needs-confirmation') {
+        state.audit.unshift(audit(
+          'broker',
+          'delete-confirmation-required',
+          `Deletion of "${event.title}" is waiting for confirmation.`,
+          patch.id,
+          event.id,
+        ));
+      }
+    });
+
+    return must(requested, 'Delete request was not created.');
+  }
+
   async claimNextIntent(workerId: string): Promise<{ intent: PlanningIntent; event: CalendarEvent } | undefined> {
     let claimed: { intent: PlanningIntent; event: CalendarEvent } | undefined;
     await this.update((state) => {
@@ -192,6 +326,163 @@ export class CalendarStore {
     });
 
     return decisions;
+  }
+
+  async createReadinessJob(request: {
+    userId: string;
+    sessionId: string;
+    meetingId: string;
+    createdBy?: string;
+  }): Promise<MeetingReadinessJob> {
+    let created: MeetingReadinessJob | undefined;
+    await this.update((state) => {
+      const meeting = findEvent(state, request.meetingId);
+      if (!meeting) {
+        throw new BrokerError(404, `Meeting ${request.meetingId} was not found.`);
+      }
+      if (meeting.kind !== 'meeting') {
+        throw new BrokerError(409, `"${meeting.title}" is a ${meeting.kind} block, not a meeting.`);
+      }
+
+      created = queueReadinessJob(state, request, meeting);
+    });
+    return must(created, 'Readiness job was not created.');
+  }
+
+  async claimNextReadinessJob(workerId: string): Promise<{ job: MeetingReadinessJob; meeting: CalendarEvent } | undefined> {
+    let claimed: { job: MeetingReadinessJob; meeting: CalendarEvent } | undefined;
+    await this.update((state) => {
+      const job = state.readinessJobs.find((item) => item.status === 'queued');
+      if (!job) {
+        return;
+      }
+
+      const meeting = findEvent(state, job.meetingId);
+      if (!meeting) {
+        job.status = 'failed';
+        job.error = `Meeting ${job.meetingId} no longer exists.`;
+        job.currentStep = 'Meeting no longer exists.';
+        job.updatedAt = new Date().toISOString();
+        state.audit.unshift(audit('broker', 'readiness-failed', job.error, undefined, job.meetingId));
+        return;
+      }
+
+      job.status = 'running';
+      job.workerId = workerId;
+      job.currentStep = 'Reading selected meeting details.';
+      job.updatedAt = new Date().toISOString();
+      state.audit.unshift(audit(workerId, 'readiness-claimed', `Meeting readiness agent claimed "${meeting.title}".`, undefined, meeting.id));
+      claimed = { job: cloneReadinessJob(job), meeting: cloneEvent(meeting) };
+    });
+    return claimed;
+  }
+
+  async recordReadinessProgress(jobId: string, step: { stepId: string; label: string; detail: string }): Promise<MeetingReadinessJob> {
+    let updated: MeetingReadinessJob | undefined;
+    await this.update((state) => {
+      const job = findReadinessJob(state, jobId);
+      if (job.status === 'canceled') {
+        updated = cloneReadinessJob(job);
+        return;
+      }
+      if (job.status !== 'running') {
+        throw new BrokerError(409, `Readiness job ${jobId} is ${job.status}, not running.`);
+      }
+
+      const completedAt = new Date().toISOString();
+      const completedStep: ReadinessStep = { id: step.stepId, label: step.label, detail: step.detail, completedAt };
+      const existingIndex = job.completedSteps.findIndex((item) => item.id === step.stepId);
+      if (existingIndex === -1) {
+        job.completedSteps.push(completedStep);
+      } else {
+        job.completedSteps[existingIndex] = completedStep;
+      }
+      job.currentStep = step.label;
+      job.updatedAt = completedAt;
+      updated = cloneReadinessJob(job);
+      state.audit.unshift(audit(job.workerId ?? 'readiness-agent', 'readiness-progress', `${step.label}: ${step.detail}`, undefined, job.meetingId));
+    });
+    return must(updated, 'Readiness progress was not recorded.');
+  }
+
+  async completeReadinessJob(jobId: string, suggestions: ReadinessSuggestion[]): Promise<MeetingReadinessJob> {
+    let completed: MeetingReadinessJob | undefined;
+    await this.update((state) => {
+      const job = findReadinessJob(state, jobId);
+      if (job.status === 'canceled') {
+        completed = cloneReadinessJob(job);
+        return;
+      }
+      if (job.status !== 'running') {
+        throw new BrokerError(409, `Readiness job ${jobId} is ${job.status}, not running.`);
+      }
+
+      job.status = 'completed';
+      job.suggestions = suggestions;
+      job.currentStep = 'Meeting readiness suggestions are ready.';
+      job.updatedAt = new Date().toISOString();
+      completed = cloneReadinessJob(job);
+      state.audit.unshift(audit(job.workerId ?? 'readiness-agent', 'readiness-completed', `Returned ${suggestions.length} meeting readiness suggestion(s).`, undefined, job.meetingId));
+    });
+    return must(completed, 'Readiness job was not completed.');
+  }
+
+  async failReadinessJob(jobId: string, error: string): Promise<MeetingReadinessJob> {
+    let failed: MeetingReadinessJob | undefined;
+    await this.update((state) => {
+      const job = findReadinessJob(state, jobId);
+      if (job.status === 'canceled') {
+        failed = cloneReadinessJob(job);
+        return;
+      }
+      job.status = 'failed';
+      job.error = error;
+      job.currentStep = 'Meeting readiness analysis failed.';
+      job.updatedAt = new Date().toISOString();
+      failed = cloneReadinessJob(job);
+      state.audit.unshift(audit(job.workerId ?? 'readiness-agent', 'readiness-failed', error, undefined, job.meetingId));
+    });
+    return must(failed, 'Readiness job was not failed.');
+  }
+
+  async acceptReadinessSuggestion(jobId: string, suggestionId: string): Promise<BrokerDecision> {
+    let accepted: BrokerDecision | undefined;
+    await this.update((state) => {
+      const job = findReadinessJob(state, jobId);
+      const suggestion = job.suggestions.find((item) => item.id === suggestionId);
+      if (!suggestion) {
+        throw new BrokerError(404, `Suggestion ${suggestionId} was not found.`);
+      }
+      if (!suggestion.proposedPatch) {
+        throw new BrokerError(409, `Suggestion ${suggestionId} does not include a calendar patch.`);
+      }
+      if (suggestion.decisionId) {
+        throw new BrokerError(409, `Suggestion ${suggestionId} was already sent to the broker.`);
+      }
+
+      const patch: CalendarPatch = {
+        ...suggestion.proposedPatch,
+        intentId: job.id,
+      };
+      const proposal: PatchProposal = {
+        id: id('proposal'),
+        intentId: job.id,
+        createdAt: new Date().toISOString(),
+        createdBy: 'readiness-agent',
+        plannerMode: 'local',
+        patches: [patch],
+      };
+
+      state.proposals.unshift(proposal);
+      state.audit.unshift(audit('readiness-agent', 'proposal-submitted', `Submitted accepted readiness suggestion "${suggestion.title}" to the broker.`));
+      accepted = evaluateAndMaybeApply(state, proposal, patch, true, {
+        policy: 'user-accepted-readiness-suggestion',
+        reason: 'User accepted the readiness suggestion; broker re-validated and applied the calendar patch.',
+      });
+      suggestion.decisionId = accepted.id;
+      job.updatedAt = new Date().toISOString();
+    });
+    return must(accepted, 'Readiness suggestion was not accepted.');
   }
 
   async confirmPatch(proposalId: string, patchId: string): Promise<BrokerDecision> {
@@ -391,6 +682,111 @@ export class CalendarStore {
     };
   }
 
+  async triggerReadinessDemo(): Promise<MeetingReadinessJob> {
+    const state = await this.load();
+    const meeting = state.events.find((item) => item.id === 'meeting-demo-review' && item.kind === 'meeting')
+      ?? state.events.find((item) => item.kind === 'meeting');
+    if (!meeting) {
+      throw new BrokerError(404, 'No meeting is available for readiness analysis.');
+    }
+    return this.createReadinessJob({
+      userId: state.userId,
+      sessionId: state.sessionId,
+      meetingId: meeting.id,
+      createdBy: 'demo-command',
+    });
+  }
+
+  async getMeeting(meetingId: string): Promise<CalendarEvent> {
+    const state = await this.load();
+    const meeting = findEvent(state, meetingId);
+    if (!meeting) {
+      throw new BrokerError(404, `Meeting ${meetingId} was not found.`);
+    }
+    if (meeting.kind !== 'meeting') {
+      throw new BrokerError(409, `"${meeting.title}" is a ${meeting.kind} block, not a meeting.`);
+    }
+    return cloneEvent(meeting);
+  }
+
+  async getCalendarWindow(meetingId: string, days = 7): Promise<{ start: string; end: string; events: CalendarEvent[] }> {
+    const state = await this.load();
+    const meeting = findEvent(state, meetingId);
+    if (!meeting) {
+      throw new BrokerError(404, `Meeting ${meetingId} was not found.`);
+    }
+
+    const start = startOfDay(addDays(new Date(meeting.start), -3));
+    const end = addDays(start, days);
+    return {
+      start: start.toISOString(),
+      end: end.toISOString(),
+      events: state.events
+        .filter((event) => overlaps(event.start, event.end, start.toISOString(), end.toISOString()))
+        .sort((a, b) => Date.parse(a.start) - Date.parse(b.start))
+        .map(cloneEvent),
+    };
+  }
+
+  async getWeatherForMeeting(meetingId: string): Promise<Record<string, unknown>> {
+    const meeting = await this.getMeeting(meetingId);
+    return {
+      meetingId,
+      location: meeting.location ?? 'Seattle',
+      forecastAt: meeting.start,
+      condition: 'Light rain and cool wind',
+      temperatureF: 58,
+      precipitationChance: 72,
+      recommendation: 'Bring a light rain jacket and umbrella; choose shoes that can handle wet sidewalks.',
+    };
+  }
+
+  async getTravelPlanForMeeting(meetingId: string): Promise<Record<string, unknown>> {
+    const state = await this.load();
+    const meeting = findEvent(state, meetingId);
+    if (!meeting) {
+      throw new BrokerError(404, `Meeting ${meetingId} was not found.`);
+    }
+
+    const meetingStart = Date.parse(meeting.start);
+    const previous = state.events
+      .filter((event) => event.id !== meeting.id && dateKey(event.end) === dateKey(meeting.start) && Date.parse(event.end) <= meetingStart)
+      .sort((a, b) => Date.parse(b.end) - Date.parse(a.end))[0];
+    const travelMinutes = meeting.location?.toLowerCase().includes('seattle') ? 25 : 10;
+    const leaveAt = new Date(meetingStart - travelMinutes * 60000);
+
+    return {
+      meetingId,
+      from: previous?.location ?? 'desk',
+      to: meeting.location ?? 'meeting location',
+      previousEvent: previous ? { id: previous.id, title: previous.title, end: previous.end } : null,
+      travelMinutes,
+      leaveAt: leaveAt.toISOString(),
+      recommendation: previous
+        ? `Leave ${travelMinutes} minutes after "${previous.title}" ends if you are going in person.`
+        : `Hold ${travelMinutes} minutes before the meeting for travel or setup.`,
+    };
+  }
+
+  async getMeetingMaterials(meetingId: string): Promise<Record<string, unknown>> {
+    const meeting = await this.getMeeting(meetingId);
+    const hasAgenda = Boolean(meeting.description?.toLowerCase().includes('review'));
+    return {
+      meetingId,
+      topic: meeting.title,
+      agendaStatus: hasAgenda ? 'agenda-present' : 'agenda-missing',
+      checklist: [
+        'Demo script with the meeting-readiness story',
+        'Aspire dashboard ready on the AppHost resource graph',
+        'Fallback talking track for broker policy and hosted-agent isolation',
+      ],
+      openQuestions: [
+        'Which readiness card should be accepted live?',
+        'Should weather/travel stay informational or become calendar blocks?',
+      ],
+    };
+  }
+
   private async saveAndPublish(): Promise<void> {
     await this.save();
     const state = await this.load();
@@ -544,11 +940,19 @@ export class BrokerError extends Error {
   }
 }
 
-function evaluateAndMaybeApply(state: AppState, proposal: PatchProposal, patch: CalendarPatch, confirmed: boolean): BrokerDecision {
+function evaluateAndMaybeApply(
+  state: AppState,
+  proposal: PatchProposal,
+  patch: CalendarPatch,
+  confirmed: boolean,
+  appliedOverride?: { policy: string; reason: string },
+): BrokerDecision {
   const event = patch.eventId ? findEvent(state, patch.eventId) : undefined;
   const evaluation = evaluatePatch(event, patch, state.userId);
   const status: BrokerDecision['status'] =
-    evaluation.kind === 'auto-apply' || confirmed ? 'applied' : evaluation.kind === 'confirm' ? 'needs-confirmation' : 'rejected';
+    evaluation.kind === 'reject' ? 'rejected' : evaluation.kind === 'auto-apply' || confirmed ? 'applied' : 'needs-confirmation';
+  const policy = status === 'applied' && appliedOverride ? appliedOverride.policy : evaluation.policy;
+  const reason = status === 'applied' && appliedOverride ? appliedOverride.reason : evaluation.reason;
 
   if (status === 'applied') {
     applyPatch(state, patch, proposal.createdBy);
@@ -561,8 +965,8 @@ function evaluateAndMaybeApply(state: AppState, proposal: PatchProposal, patch: 
     intentId: proposal.intentId,
     eventId: patch.eventId,
     status,
-    policy: evaluation.policy,
-    reason: evaluation.reason,
+    policy,
+    reason,
     createdAt: new Date().toISOString(),
     canConfirm: status === 'needs-confirmation' && evaluation.canConfirm,
   };
@@ -579,7 +983,7 @@ function applyPatch(state: AppState, patch: CalendarPatch, actor: string): void 
       calendarId: patch.changes.calendarId ?? primaryCalendarId,
       ownerId: state.userId,
       title: patch.changes.title ?? 'New planned block',
-      kind: 'draft',
+      kind: patch.changes.kind ?? 'draft',
       start: must(patch.changes.start, 'Create patch requires start.'),
       end: must(patch.changes.end, 'Create patch requires end.'),
       etag: makeEtag(eventId, 1),
@@ -601,6 +1005,7 @@ function applyPatch(state: AppState, patch: CalendarPatch, actor: string): void 
 
   if (patch.operation === 'delete') {
     state.events.splice(index, 1);
+    cancelReadinessJobsForMeeting(state, previousEvent);
     state.audit.unshift(audit(actor, 'patch-applied', `Deleted "${previousEvent.title}".`, patch.id, previousEvent.id, previousEvent));
     return;
   }
@@ -613,6 +1018,451 @@ function applyPatch(state: AppState, patch: CalendarPatch, actor: string): void 
   };
   state.audit.unshift(audit(actor, 'patch-applied', `Updated "${state.events[index].title}".`, patch.id, state.events[index].id, previousEvent));
 }
+
+function cancelReadinessJobsForMeeting(state: AppState, meeting: CalendarEvent): void {
+  const now = new Date().toISOString();
+  let canceledCount = 0;
+  for (const job of state.readinessJobs) {
+    if (job.meetingId !== meeting.id || !['queued', 'running'].includes(job.status)) {
+      continue;
+    }
+    job.status = 'canceled';
+    job.currentStep = 'Meeting was deleted before readiness analysis finished.';
+    job.updatedAt = now;
+    delete job.error;
+    canceledCount += 1;
+  }
+
+  if (canceledCount > 0) {
+    state.audit.unshift(audit(
+      'broker',
+      'readiness-canceled',
+      `Canceled ${canceledCount} readiness job${canceledCount === 1 ? '' : 's'} for deleted meeting "${meeting.title}".`,
+      undefined,
+      meeting.id,
+    ));
+  }
+}
+
+function createBuildWeekEvents(now = new Date('2026-06-02T09:00:00-07:00')): CalendarEvent[] {
+  const weekStart = startOfDay(now);
+  const events: CalendarEvent[] = [];
+  const occupied = new Map<number, Array<{ start: string; end: string }>>();
+  const add = (dayOffset: number, hour: number, minute: number, durationMinutes: number, draft: CalendarEventDraft, eventId?: string) => {
+    const start = at(weekStart, dayOffset, hour, minute);
+    const end = new Date(start.getTime() + durationMinutes * 60000);
+    if (hasOverlap(occupied.get(dayOffset) ?? [], start.toISOString(), end.toISOString())) {
+      return false;
+    }
+
+    const idPart = eventId ?? id(`event-${dayOffset}`);
+    events.push({
+      id: idPart,
+      calendarId: draft.calendarId ?? primaryCalendarId,
+      ownerId: draft.ownerId ?? demoUserId,
+      title: draft.title,
+      kind: draft.kind,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      etag: makeEtag(idPart, 1),
+      attendees: draft.attendees ?? [],
+      location: draft.location,
+      description: draft.description,
+    });
+    occupied.set(dayOffset, [...(occupied.get(dayOffset) ?? []), { start: start.toISOString(), end: end.toISOString() }]);
+    return true;
+  };
+
+  add(0, 8, 30, 45, {
+    title: 'Badge pickup and speaker check-in',
+    kind: 'task',
+    location: 'Convention center lobby',
+  }, 'task-badge-pickup');
+  add(0, 11, 0, 60, {
+    title: 'Build keynote sync',
+    kind: 'meeting',
+    attendees: ['nikki@example.com', 'scott@example.com'],
+    location: 'Teams',
+    description: 'Confirm keynote timing, demo handoff, and fallback plan.',
+  }, 'meeting-1');
+  add(3, 15, 0, 60, {
+    title: 'Build 2026 demo readiness review',
+    kind: 'meeting',
+    attendees: ['nikki@example.com', 'scott@example.com', 'maya@example.com'],
+    location: 'Microsoft Reactor - Seattle',
+    description: 'Review the Aspire agent demo story, readiness cards, and broker safety boundary.',
+  }, 'meeting-demo-review');
+  add(3, 13, 0, 60, {
+    title: 'Shared booth coverage',
+    kind: 'team',
+    calendarId: teamCalendarId,
+    ownerId: 'team-build',
+    attendees: ['team@example.com'],
+    location: 'Expo hall',
+  }, 'team-1');
+
+  const usedTitles = new Set(events.map((event) => event.title));
+  const slots: Array<[number, number]> = [
+    [8, 30],
+    [9, 0],
+    [10, 0],
+    [11, 0],
+    [13, 0],
+    [14, 0],
+    [15, 0],
+    [16, 0],
+  ];
+
+  for (let dayOffset = 0; dayOffset < 7; dayOffset += 1) {
+    const targetCount = dayOffset >= 5 ? randomInt(1, 3) : randomInt(3, 6);
+    const shuffledSlots = shuffle(slots);
+    for (const [hour, minute] of shuffledSlots) {
+      const currentCount = events.filter((event) => dateKey(event.start) === dateKey(at(weekStart, dayOffset, 0, 0).toISOString())).length;
+      if (currentCount >= targetCount) {
+        break;
+      }
+
+      const draft = randomBuildEventDraft(dayOffset, usedTitles);
+      if (add(dayOffset, hour, minute, draft.durationMinutes, draft)) {
+        usedTitles.add(draft.title);
+      }
+    }
+  }
+
+  return events.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+}
+
+function clearTransientAgentState(state: AppState): void {
+  state.intents = [];
+  state.proposals = [];
+  state.decisions = [];
+  state.readinessJobs = [];
+  state.lastDragIntentId = undefined;
+}
+
+type BuildEventDraft = {
+  title: string;
+  kind: EventKind;
+  durationMinutes: number;
+  calendarId?: string;
+  ownerId?: string;
+  attendees?: string[];
+  location?: string;
+  description?: string;
+};
+
+type CalendarEventDraft = Omit<BuildEventDraft, 'durationMinutes'>;
+
+function randomBuildEventDraft(dayOffset: number, usedTitles: Set<string>): BuildEventDraft {
+  const pool = daySpecificBuildEvents[dayOffset] ?? weekdayBuildEvents;
+  const available = pool.filter((event) => !usedTitles.has(event.title));
+  if (available.length === 0) {
+    const fallback = fallbackBuildEvents.filter((event) => !usedTitles.has(event.title));
+    return {
+      ...pick(fallback.length > 0 ? fallback : fallbackBuildEvents),
+    };
+  }
+  return { ...pick(available) };
+}
+
+const daySpecificBuildEvents: Record<number, BuildEventDraft[]> = {
+  0: [
+    {
+      title: 'Keynote rehearsal notes',
+      kind: 'draft',
+      durationMinutes: 30,
+      location: 'Speaker room',
+    },
+    {
+      title: 'Build keynote watch block',
+      kind: 'meeting',
+      durationMinutes: 60,
+      attendees: ['nikki@example.com', 'scott@example.com'],
+      location: 'Teams',
+    },
+    {
+      title: 'Expo booth setup',
+      kind: 'team',
+      durationMinutes: 60,
+      calendarId: teamCalendarId,
+      ownerId: 'team-build',
+      attendees: ['team@example.com'],
+      location: 'Expo hall',
+    },
+    {
+      title: 'Review opening demo checklist',
+      kind: 'focus',
+      durationMinutes: 45,
+      location: 'Speaker room',
+    },
+  ],
+  1: [
+    {
+      title: 'Customer hallway follow-up',
+      kind: 'meeting',
+      durationMinutes: 45,
+      attendees: ['customer@example.com', 'maya@example.com'],
+      location: 'Conference room 4B',
+    },
+    {
+      title: 'Polish hosted-agent talking points',
+      kind: 'focus',
+      durationMinutes: 60,
+      location: 'Desk',
+    },
+    {
+      title: 'Partner demo prep',
+      kind: 'prep',
+      durationMinutes: 45,
+      location: 'Speaker room',
+    },
+    {
+      title: 'Capture keynote action items',
+      kind: 'draft',
+      durationMinutes: 30,
+      location: 'Desk',
+    },
+  ],
+  2: [
+    {
+      title: 'Agent safety story review',
+      kind: 'meeting',
+      durationMinutes: 45,
+      attendees: ['sarah@example.com', 'nikki@example.com'],
+      location: 'Teams',
+      description: 'Review broker authority, confirmation policy, and hosted-agent boundaries.',
+    },
+    {
+      title: 'Dry-run resource commands',
+      kind: 'focus',
+      durationMinutes: 60,
+      location: 'Speaker room',
+    },
+    {
+      title: 'Booth Q&A rotation',
+      kind: 'team',
+      durationMinutes: 60,
+      calendarId: teamCalendarId,
+      ownerId: 'team-build',
+      attendees: ['team@example.com'],
+      location: 'Expo hall',
+    },
+    {
+      title: 'Lunch and hallway buffer',
+      kind: 'task',
+      durationMinutes: 45,
+      location: 'Conference center',
+    },
+  ],
+  3: [
+    {
+      title: 'Final demo environment check',
+      kind: 'focus',
+      durationMinutes: 60,
+      location: 'Speaker room',
+    },
+    {
+      title: 'Customer feedback readout',
+      kind: 'meeting',
+      durationMinutes: 45,
+      attendees: ['maya@example.com', 'customer@example.com'],
+      location: 'Teams',
+    },
+    {
+      title: 'Update demo script',
+      kind: 'draft',
+      durationMinutes: 45,
+      location: 'Desk',
+    },
+  ],
+  4: [
+    {
+      title: 'Office hours: Aspire app model',
+      kind: 'team',
+      durationMinutes: 60,
+      calendarId: teamCalendarId,
+      ownerId: 'team-build',
+      attendees: ['team@example.com'],
+      location: 'Expo hall',
+    },
+    {
+      title: 'File bugs from rehearsal',
+      kind: 'task',
+      durationMinutes: 45,
+      location: 'Desk',
+    },
+    {
+      title: 'Write Build recap draft',
+      kind: 'draft',
+      durationMinutes: 45,
+      location: 'Hotel lobby',
+    },
+  ],
+  5: [
+    {
+      title: 'Pack demo kit',
+      kind: 'task',
+      durationMinutes: 45,
+      location: 'Hotel',
+    },
+    {
+      title: 'Review speaker notes',
+      kind: 'focus',
+      durationMinutes: 60,
+      location: 'Hotel',
+    },
+    {
+      title: 'Team dinner logistics',
+      kind: 'team',
+      durationMinutes: 60,
+      calendarId: teamCalendarId,
+      ownerId: 'team-build',
+      attendees: ['team@example.com'],
+      location: 'Restaurant',
+    },
+  ],
+  6: [
+    {
+      title: 'Send Build week recap',
+      kind: 'draft',
+      durationMinutes: 30,
+      location: 'Desk',
+    },
+    {
+      title: 'Expense receipts',
+      kind: 'task',
+      durationMinutes: 30,
+      location: 'Hotel',
+    },
+    {
+      title: 'Fly home',
+      kind: 'prep',
+      durationMinutes: 60,
+      location: 'Airport',
+    },
+  ],
+};
+
+const weekdayBuildEvents: BuildEventDraft[] = [
+  {
+    title: 'Rehearse Aspire dashboard reveal',
+    kind: 'focus',
+    durationMinutes: 60,
+    location: 'Speaker room',
+  },
+  {
+    title: 'Polish meeting readiness cards',
+    kind: 'task',
+    durationMinutes: 45,
+    location: 'Desk',
+  },
+  {
+    title: 'Agent safety story review',
+    kind: 'meeting',
+    durationMinutes: 45,
+    attendees: ['sarah@example.com', 'nikki@example.com'],
+    location: 'Teams',
+    description: 'Review broker authority, confirmation policy, and hosted-agent boundaries.',
+  },
+  {
+    title: 'Partner briefing: cloud-native agents',
+    kind: 'meeting',
+    durationMinutes: 60,
+    attendees: ['partner@example.com', 'scott@example.com'],
+    location: 'Conference room 4B',
+  },
+  {
+    title: 'Test ACA deployment path',
+    kind: 'task',
+    durationMinutes: 60,
+    location: 'Desk',
+  },
+  {
+    title: 'Customer feedback readout',
+    kind: 'meeting',
+    durationMinutes: 45,
+    attendees: ['maya@example.com', 'customer@example.com'],
+    location: 'Teams',
+  },
+  {
+    title: 'Booth Q&A rotation',
+    kind: 'team',
+    durationMinutes: 60,
+    calendarId: teamCalendarId,
+    ownerId: 'team-build',
+    attendees: ['team@example.com'],
+    location: 'Expo hall',
+  },
+  {
+    title: 'Update demo script',
+    kind: 'draft',
+    durationMinutes: 45,
+    location: 'Desk',
+  },
+  {
+    title: 'Office hours: Aspire app model',
+    kind: 'team',
+    durationMinutes: 60,
+    calendarId: teamCalendarId,
+    ownerId: 'team-build',
+    attendees: ['team@example.com'],
+    location: 'Expo hall',
+  },
+  {
+    title: 'Lunch and hallway buffer',
+    kind: 'task',
+    durationMinutes: 45,
+    location: 'Conference center',
+  },
+  {
+    title: 'Record follow-up notes',
+    kind: 'draft',
+    durationMinutes: 30,
+    location: 'Hotel lobby',
+  },
+  {
+    title: 'Dry-run resource commands',
+    kind: 'focus',
+    durationMinutes: 60,
+    location: 'Speaker room',
+  },
+];
+
+const fallbackBuildEvents: BuildEventDraft[] = [
+  {
+    title: 'Pack demo kit',
+    kind: 'task',
+    durationMinutes: 45,
+    location: 'Hotel',
+  },
+  {
+    title: 'Venue-to-hotel travel buffer',
+    kind: 'prep',
+    durationMinutes: 45,
+    location: 'Hotel lobby',
+  },
+  {
+    title: 'Review speaker notes',
+    kind: 'focus',
+    durationMinutes: 60,
+    location: 'Hotel',
+  },
+  {
+    title: 'Send Build week recap',
+    kind: 'draft',
+    durationMinutes: 30,
+    location: 'Desk',
+  },
+  {
+    title: 'Team dinner logistics',
+    kind: 'team',
+    durationMinutes: 60,
+    calendarId: teamCalendarId,
+    ownerId: 'team-build',
+    attendees: ['team@example.com'],
+    location: 'Restaurant',
+  },
+];
 
 function audit(
   actor: string,
@@ -636,6 +1486,122 @@ function audit(
 
 function findEvent(state: AppState, eventId: string): CalendarEvent | undefined {
   return state.events.find((event) => event.id === eventId);
+}
+
+function findReadinessJob(state: AppState, jobId: string): MeetingReadinessJob {
+  const job = state.readinessJobs.find((item) => item.id === jobId);
+  if (!job) {
+    throw new BrokerError(404, `Readiness job ${jobId} was not found.`);
+  }
+  return job;
+}
+
+function queueReadinessJob(
+  state: AppState,
+  request: {
+    userId: string;
+    sessionId: string;
+    meetingId: string;
+    createdBy?: string;
+  },
+  meeting: CalendarEvent,
+): MeetingReadinessJob {
+  const now = new Date().toISOString();
+  const created: MeetingReadinessJob = {
+    id: id('readiness'),
+    userId: request.userId,
+    sessionId: request.sessionId,
+    meetingId: request.meetingId,
+    status: 'queued',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: request.createdBy ?? 'user',
+    currentStep: 'Queued for meeting readiness agent.',
+    completedSteps: [],
+    suggestions: [],
+  };
+  state.readinessJobs.unshift(created);
+  state.audit.unshift(audit(
+    request.createdBy ?? 'user',
+    'readiness-queued',
+    `Queued meeting readiness analysis for "${meeting.title}".`,
+    undefined,
+    meeting.id,
+  ));
+  return created;
+}
+
+function cloneEvent(event: CalendarEvent): CalendarEvent {
+  return {
+    ...event,
+    attendees: [...event.attendees],
+  };
+}
+
+function cloneReadinessJob(job: MeetingReadinessJob): MeetingReadinessJob {
+  return {
+    ...job,
+    completedSteps: job.completedSteps.map((step) => ({ ...step })),
+    suggestions: job.suggestions.map((suggestion) => ({
+      ...suggestion,
+      proposedPatch: suggestion.proposedPatch
+        ? {
+            ...suggestion.proposedPatch,
+            changes: {
+              ...suggestion.proposedPatch.changes,
+              attendees: suggestion.proposedPatch.changes.attendees ? [...suggestion.proposedPatch.changes.attendees] : undefined,
+            },
+          }
+        : undefined,
+    })),
+  };
+}
+
+function startOfDay(value: Date): Date {
+  const date = new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function addDays(value: Date, days: number): Date {
+  const date = new Date(value);
+  date.setDate(date.getDate() + days);
+  return date;
+}
+
+function overlaps(eventStart: string, eventEnd: string, windowStart: string, windowEnd: string): boolean {
+  return Date.parse(eventStart) < Date.parse(windowEnd) && Date.parse(eventEnd) > Date.parse(windowStart);
+}
+
+function hasOverlap(events: Array<{ start: string; end: string }>, start: string, end: string): boolean {
+  return events.some((event) => overlaps(event.start, event.end, start, end));
+}
+
+function at(day: Date, dayOffset: number, hour: number, minute: number): Date {
+  const date = addDays(day, dayOffset);
+  date.setHours(hour, minute, 0, 0);
+  return date;
+}
+
+function shuffle<T>(items: T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = randomInt(0, i);
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+function pick<T>(items: T[]): T {
+  return items[randomInt(0, items.length - 1)];
+}
+
+function randomInt(min: number, max: number): number {
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+function dateKey(value: string): string {
+  return new Date(value).toISOString().slice(0, 10);
 }
 
 function defaultStateDirectory(): string {
