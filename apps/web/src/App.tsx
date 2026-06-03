@@ -1,5 +1,5 @@
 import { type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, CalendarPlus, CheckCircle2, Clock3, ShieldCheck, Trash2, XCircle } from 'lucide-react';
+import { Activity, Bot, Bug, CalendarPlus, CheckCircle2, Clock3, ListChecks, ShieldCheck, Trash2, XCircle } from 'lucide-react';
 import {
   type AppState,
   type BookMeetingRequest,
@@ -73,6 +73,14 @@ type BookMeetingResponse = {
   job: MeetingReadinessJob;
 };
 
+type DecisionMetrics = {
+  applied: number;
+  pending: number;
+  rejected: number;
+};
+
+type DebugTab = 'confirmations' | 'runtime' | 'audit' | 'state';
+
 type DraftSelection = {
   startMinutes: number;
   endMinutes: number;
@@ -113,6 +121,7 @@ export function App() {
   const [deleteCandidate, setDeleteCandidate] = useState<CalendarEvent | undefined>();
   const [deletingEvent, setDeletingEvent] = useState(false);
   const [toast, setToast] = useState<Toast | undefined>();
+  const [debugOpen, setDebugOpen] = useState(false);
   const dragRef = useRef<DragState | undefined>(undefined);
   const toastId = useRef(0);
 
@@ -136,10 +145,6 @@ export function App() {
   const selectedReadinessJob = useMemo(
     () => selectedEvent ? state?.readinessJobs.find((job) => job.meetingId === selectedEvent.id) : undefined,
     [selectedEvent, state],
-  );
-  const pendingDecisions = useMemo(
-    () => state?.decisions.filter((decision) => decision.status === 'needs-confirmation') ?? [],
-    [state],
   );
   const metrics = useMemo(() => {
     const decisions = state?.decisions ?? [];
@@ -480,26 +485,29 @@ export function App() {
   return (
     <main className="mx-auto flex w-full max-w-[1320px] flex-col gap-4 px-5 py-5">
       <section className="rounded-xl border border-border/70 bg-card/60 px-4 py-3 shadow-sm backdrop-blur">
-        <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-3">
             <div className="mt-0.5 flex size-9 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
               <ShieldCheck className="size-4" />
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-2xl font-semibold tracking-tight text-foreground">Calendar Operations</h1>
+                <h1 className="text-2xl font-semibold tracking-tight text-foreground">Calendar assistant</h1>
                 <Badge variant="secondary">Broker enforced</Badge>
               </div>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-                Book a meeting, let the readiness agent run tools, then accept useful suggestions through the broker.
+                Book meetings, drag calendar blocks, and review only the broker decisions that need your input.
               </p>
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-2" aria-label="Broker decisions">
-            <Metric label="Applied" value={metrics.applied} tone="good" icon={<CheckCircle2 />} />
-            <Metric label="Needs confirmation" value={metrics.pending} tone="hold" icon={<Clock3 />} />
-            <Metric label="Rejected" value={metrics.rejected} tone="bad" icon={<XCircle />} />
-          </div>
+          <Button
+            variant={debugOpen ? 'secondary' : 'outline'}
+            onClick={() => setDebugOpen((current) => !current)}
+            aria-pressed={debugOpen}
+          >
+            <Bug className="size-4" />
+            {debugOpen ? 'Close dev tools' : 'Dev tools'}
+          </Button>
         </div>
       </section>
 
@@ -609,7 +617,6 @@ export function App() {
                   {selectedEvent.location ? (
                     <p className="text-sm text-muted-foreground">{selectedEvent.location}</p>
                   ) : null}
-                  <p className="truncate text-xs text-muted-foreground">etag {selectedEvent.etag}</p>
                   <div className="flex flex-wrap gap-2">
                     {selectedEvent.kind === 'meeting' ? (
                       <Button
@@ -648,96 +655,19 @@ export function App() {
             onStart={(event) => void startReadiness(event)}
             onAccept={(job, suggestion) => void acceptReadinessSuggestion(job, suggestion)}
           />
-
-          <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
-            <CardHeader className="pb-2">
-              <CardDescription>Broker policy</CardDescription>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <ShieldCheck className="size-4 text-primary" />
-                Safe writes only
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <ul className="space-y-2 text-sm leading-5 text-muted-foreground">
-                <li>Owned focus, task, and draft moves auto-apply with undo.</li>
-                <li>Meeting moves, deletes, and attendee/location changes require confirmation.</li>
-                <li>Team calendars, non-owned events, and stale etags are rejected.</li>
-              </ul>
-            </CardContent>
-          </Card>
         </aside>
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[0.9fr_1.2fr_1fr]">
-        <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
-          <CardHeader className="pb-2">
-            <CardDescription>Pending confirmations</CardDescription>
-            <CardTitle className="text-base">{pendingDecisions.length} held proposal{pendingDecisions.length === 1 ? '' : 's'}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {pendingDecisions.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Use Earlier/Later on a meeting with attendees to see a held proposal; deletes use the trash modal.</p>
-            ) : (
-              <div className="space-y-2">
-                {pendingDecisions.map((decision) => (
-                  <div className="rounded-lg border border-amber-400/20 bg-amber-400/10 p-3" key={decision.id}>
-                    <div className="flex items-center justify-between gap-3">
-                      <strong className="text-sm text-amber-100">{decision.policy}</strong>
-                      <Badge variant="warning">needs review</Badge>
-                    </div>
-                    <p className="mt-2 text-sm leading-5 text-muted-foreground">{decision.reason}</p>
-                    <div className="mt-3 flex gap-2">
-                      <Button size="sm" onClick={() => void confirm(decision)}>
-                        Approve
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => void reject(decision)}>
-                        Reject
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
-          <CardHeader className="pb-2">
-            <CardDescription>Audit trail</CardDescription>
-            <CardTitle className="text-base">Broker activity</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="max-h-72 space-y-2 overflow-auto pr-1">
-              {state.audit.slice(0, 9).map((entry) => (
-                <div className="grid grid-cols-[3.5rem_6rem_1fr] gap-3 rounded-lg border border-border/60 bg-background/35 p-2.5 text-sm" key={entry.id}>
-                  <span className="text-xs text-muted-foreground">{formatClock(entry.at)}</span>
-                  <strong className="truncate text-xs font-medium text-primary">{entry.actor}</strong>
-                  <p className="m-0 leading-5 text-muted-foreground">{entry.message}</p>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
-          <CardHeader className="pb-2">
-            <CardDescription>Agent runtime boundary</CardDescription>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Bot className="size-4 text-primary" />
-              Planner isolation
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm leading-5 text-muted-foreground">
-              ACA hosts stable services. Foundry hosted agents run as isolated planner sessions and still cannot write
-              the calendar directly.
-            </p>
-            <pre className="mt-3 max-h-56 overflow-auto rounded-lg border border-border/60 bg-background/65 p-3 text-[11px] leading-5 text-muted-foreground">
-              {JSON.stringify(latestAgentSession(state), null, 2)}
-            </pre>
-          </CardContent>
-        </Card>
-      </section>
+      {debugOpen ? (
+        <DebugView
+          state={state}
+          selectedEvent={selectedEvent}
+          metrics={metrics}
+          onConfirm={(decision) => void confirm(decision)}
+          onReject={(decision) => void reject(decision)}
+          onClose={() => setDebugOpen(false)}
+        />
+      ) : null}
 
       {toast ? (
         <div className="fixed bottom-5 right-5 max-w-md rounded-lg border border-emerald-400/25 bg-emerald-950/90 px-4 py-3 text-sm text-emerald-50 shadow-lg shadow-black/30 backdrop-blur">
@@ -952,9 +882,6 @@ function CalendarBoard(props: {
           <CardDescription>7-day calendar</CardDescription>
           <CardTitle className="text-base">Book a meeting or inspect an existing one</CardTitle>
         </div>
-        <Badge variant="outline" className="hidden border-border/70 text-muted-foreground sm:inline-flex">
-          {primaryCalendarId}
-        </Badge>
       </CardHeader>
       <CardContent>
         <div className="mb-3 grid grid-cols-7 gap-2">
@@ -1104,19 +1031,20 @@ function ReadinessPanel(props: {
 }) {
   const event = props.event;
   const job = props.job;
+  const running = job?.status === 'queued' || job?.status === 'running';
 
   return (
     <Card className="border-border/70 bg-card/70 shadow-sm backdrop-blur">
       <CardHeader className="pb-2">
-        <CardDescription>Meeting readiness</CardDescription>
+        <CardDescription>Meeting prep</CardDescription>
         <CardTitle className="flex items-center gap-2 text-base">
           <Bot className="size-4 text-primary" />
-          Long-running agent job
+          Readiness agent
         </CardTitle>
       </CardHeader>
       <CardContent>
         {!event || event.kind !== 'meeting' ? (
-          <p className="text-sm leading-5 text-muted-foreground">Select a meeting to run prep, weather, travel, and materials analysis.</p>
+          <p className="text-sm leading-5 text-muted-foreground">Select a meeting to get prep-time, weather, travel, and agenda suggestions.</p>
         ) : (
           <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1133,32 +1061,24 @@ function ReadinessPanel(props: {
               </Badge>
               <Button
                 size="sm"
-                variant={job?.status === 'queued' || job?.status === 'running' ? 'secondary' : 'default'}
-                disabled={job?.status === 'queued' || job?.status === 'running'}
+                variant={running ? 'secondary' : 'default'}
+                disabled={running}
                 onClick={() => props.onStart(event)}
               >
-                {job?.status === 'queued' || job?.status === 'running' ? 'Running tools' : 'Find prep time'}
+                {running ? 'Running' : 'Find prep time'}
               </Button>
             </div>
 
-            {job?.currentStep ? (
-              <div className="rounded-lg border border-primary/20 bg-primary/10 p-3 text-sm">
-                <strong className="text-primary">{job.currentStep}</strong>
-                {job.status === 'failed' && job.error ? (
-                  <p className="mt-1 text-muted-foreground">{job.error}</p>
-                ) : null}
-              </div>
+            {running ? (
+              <p className="rounded-lg border border-primary/20 bg-primary/10 p-3 text-sm leading-5 text-primary">
+                {job?.currentStep ?? 'Agent is checking meeting context.'}
+              </p>
             ) : null}
 
-            {job && job.completedSteps.length > 0 ? (
-              <div className="space-y-1.5">
-                {job.completedSteps.map((step) => (
-                  <div className="rounded-md border border-border/60 bg-background/35 px-2.5 py-2 text-xs" key={step.id}>
-                    <strong className="text-foreground">{step.label}</strong>
-                    <p className="mt-0.5 text-muted-foreground">{step.detail}</p>
-                  </div>
-                ))}
-              </div>
+            {job?.status === 'failed' && job.error ? (
+              <p className="rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-sm leading-5 text-destructive-foreground">
+                {job.error}
+              </p>
             ) : null}
 
             {job && job.suggestions.length > 0 ? (
@@ -1176,12 +1096,13 @@ function ReadinessPanel(props: {
                           </Badge>
                           <strong className="block text-sm text-foreground">{suggestion.title}</strong>
                         </div>
-                        {decision ? <Badge variant={decision.status === 'applied' ? 'success' : 'warning'}>{decision.status}</Badge> : null}
+                       {decision ? (
+                         <Badge variant={decision.status === 'applied' ? 'success' : decision.status === 'rejected' ? 'destructive' : 'warning'}>
+                           {decision.status}
+                         </Badge>
+                       ) : null}
                       </div>
                       <p className="mt-2 text-sm leading-5 text-muted-foreground">{suggestion.detail}</p>
-                      {suggestion.rationale ? (
-                        <p className="mt-1 text-xs leading-5 text-muted-foreground">{suggestion.rationale}</p>
-                      ) : null}
                       {suggestion.proposedPatch && !decision ? (
                         <Button className="mt-3" size="sm" onClick={() => props.onAccept(job, suggestion)}>
                           Add to calendar
@@ -1191,9 +1112,358 @@ function ReadinessPanel(props: {
                   );
                 })}
               </div>
+            ) : !running && !job ? (
+              <p className="text-sm leading-5 text-muted-foreground">Run the agent after selecting a meeting; detailed tool traces are in debug view.</p>
+            ) : job?.status === 'completed' ? (
+              <p className="text-sm leading-5 text-muted-foreground">No calendar changes were suggested.</p>
             ) : null}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PendingConfirmationsPanel(props: {
+  decisions: BrokerDecision[];
+  onConfirm: (decision: BrokerDecision) => void;
+  onReject: (decision: BrokerDecision) => void;
+}) {
+  return (
+    <Card className="border-amber-400/25 bg-amber-400/10 shadow-sm">
+      <CardHeader className="pb-2">
+        <CardDescription>Review required</CardDescription>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Clock3 className="size-4 text-amber-200" />
+          {props.decisions.length} broker proposal{props.decisions.length === 1 ? '' : 's'} held
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {props.decisions.length === 0 ? (
+          <p className="rounded-lg border border-border/60 bg-background/35 p-3 text-sm text-muted-foreground">
+            No held proposals. Meeting moves and sensitive changes will appear here when the broker requires review.
+          </p>
+        ) : (
+          <div className="grid gap-2 lg:grid-cols-2">
+            {props.decisions.map((decision) => (
+              <div className="rounded-lg border border-amber-400/25 bg-background/40 p-3" key={decision.id}>
+                <div className="flex items-center justify-between gap-3">
+                  <strong className="text-sm text-amber-100">{decision.policy}</strong>
+                  <Badge variant="warning">needs review</Badge>
+                </div>
+                <p className="mt-2 text-sm leading-5 text-muted-foreground">{decision.reason}</p>
+                <div className="mt-3 flex gap-2">
+                  <Button size="sm" onClick={() => props.onConfirm(decision)}>
+                    Approve
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => props.onReject(decision)}>
+                    Reject
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DebugView(props: {
+  state: AppState;
+  selectedEvent: CalendarEvent | undefined;
+  metrics: DecisionMetrics;
+  onConfirm: (decision: BrokerDecision) => void;
+  onReject: (decision: BrokerDecision) => void;
+  onClose: () => void;
+}) {
+  const [activeTab, setActiveTab] = useState<DebugTab>(() => props.metrics.pending > 0 ? 'confirmations' : 'runtime');
+  const activeJobs = props.state.readinessJobs.filter((job) => job.status === 'queued' || job.status === 'running');
+  const pendingIntents = props.state.intents.filter((intent) => intent.status === 'queued' || intent.status === 'planning');
+  const pendingDecisions = props.state.decisions.filter((decision) => decision.status === 'needs-confirmation');
+  const latestProposal = props.state.proposals[0] ?? null;
+  const agentSession = latestAgentSession(props.state);
+  const tabs: Array<{ id: DebugTab; label: string; count?: number }> = [
+    { id: 'confirmations', label: 'Confirmations', count: pendingDecisions.length },
+    { id: 'runtime', label: 'Runtime', count: activeJobs.length + pendingIntents.length },
+    { id: 'audit', label: 'Audit', count: props.state.audit.length },
+    { id: 'state', label: 'State' },
+  ];
+  const rawAgentState = {
+    version: props.state.version,
+    updatedAt: props.state.updatedAt,
+    userId: props.state.userId,
+    sessionId: props.state.sessionId,
+    selectedEvent: props.selectedEvent ?? null,
+    agentSession,
+    intents: props.state.intents,
+    proposals: props.state.proposals,
+    decisions: props.state.decisions,
+    readinessJobs: props.state.readinessJobs,
+    audit: props.state.audit,
+  };
+
+  return (
+    <section
+      className="fixed inset-x-3 bottom-3 z-40 mx-auto flex h-[560px] max-h-[68vh] min-h-[360px] max-w-[1320px] flex-col overflow-hidden rounded-xl border border-border/80 bg-card/95 shadow-2xl shadow-black/50 backdrop-blur-xl"
+      aria-label="Agent dev tools"
+    >
+      <div className="shrink-0 flex flex-col gap-3 border-b border-border/70 bg-background/40 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-primary/25 bg-primary/10 text-primary">
+            <Bug className="size-4" />
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold tracking-wide text-foreground">Agent dev tools</h2>
+            <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+              Broker confirmations, audit trail, runtime boundary, proposals, jobs, and raw state.
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="secondary">state v{props.state.version}</Badge>
+          <span className="text-xs text-muted-foreground">Updated {formatClock(props.state.updatedAt)}</span>
+          <Button size="sm" variant="ghost" onClick={props.onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
+
+      <div className="shrink-0 grid gap-2 border-b border-border/70 bg-background/25 p-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7" aria-label="Dev tools counters">
+        <DevToolsCounter label="Applied" value={props.metrics.applied} tone="good" icon={<CheckCircle2 />} />
+        <DevToolsCounter label="Needs review" value={props.metrics.pending} tone="hold" icon={<Clock3 />} />
+        <DevToolsCounter label="Rejected" value={props.metrics.rejected} tone="bad" icon={<XCircle />} />
+        <DevToolsCounter label="Active jobs" value={activeJobs.length} icon={<Bot className="size-4" />} />
+        <DevToolsCounter label="Pending intents" value={pendingIntents.length} icon={<Activity className="size-4" />} />
+        <DevToolsCounter label="Proposals" value={props.state.proposals.length} icon={<ListChecks className="size-4" />} />
+        <DevToolsCounter label="Audit entries" value={props.state.audit.length} icon={<ShieldCheck className="size-4" />} />
+      </div>
+
+      <nav className="shrink-0 flex overflow-x-auto border-b border-border/70 bg-background/35 px-2" aria-label="Dev tools panels">
+        {tabs.map((tab) => (
+          <button
+            type="button"
+            className={cn(
+              'flex items-center gap-2 border-b-2 px-3 py-2 text-xs font-medium transition',
+              activeTab === tab.id
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground',
+            )}
+            onClick={() => setActiveTab(tab.id)}
+            aria-pressed={activeTab === tab.id}
+            key={tab.id}
+          >
+            {tab.label}
+            {tab.count !== undefined ? (
+              <span className="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] text-secondary-foreground">{tab.count}</span>
+            ) : null}
+          </button>
+        ))}
+      </nav>
+
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        {activeTab === 'confirmations' ? (
+          <div className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+            <PendingConfirmationsPanel decisions={pendingDecisions} onConfirm={props.onConfirm} onReject={props.onReject} />
+            <BrokerPolicyPanel decisions={props.state.decisions} />
+          </div>
+        ) : null}
+
+        {activeTab === 'runtime' ? (
+          <div className="grid gap-4 xl:grid-cols-2">
+            <AgentRuntimeBoundaryPanel agentSession={agentSession} />
+            <AgentWorkPanel intents={props.state.intents} readinessJobs={props.state.readinessJobs} />
+            <DebugJsonCard title="Agent session" value={agentSession} />
+            <DebugJsonCard title="Latest proposal" value={latestProposal} />
+          </div>
+        ) : null}
+
+        {activeTab === 'audit' ? <AuditTrailPanel audit={props.state.audit} /> : null}
+
+        {activeTab === 'state' ? (
+          <DebugJsonCard
+            title="Raw agent state"
+            description="Intents, proposals, decisions, readiness jobs, audit entries, selected event, and session details."
+            value={rawAgentState}
+          />
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function DevToolsCounter(props: { label: string; value: number; tone?: 'good' | 'hold' | 'bad'; icon: React.ReactNode }) {
+  const toneClass = {
+    good: 'text-emerald-300',
+    hold: 'text-amber-300',
+    bad: 'text-rose-300',
+  }[props.tone ?? 'good'];
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-background/40 px-3 py-2">
+      <div className={cn('mb-1 flex items-center justify-between', toneClass)}>
+        {props.icon}
+        <strong className="text-base font-semibold leading-none">{props.value}</strong>
+      </div>
+      <span className="block truncate text-[11px] text-muted-foreground">{props.label}</span>
+    </div>
+  );
+}
+
+function BrokerPolicyPanel(props: { decisions: BrokerDecision[] }) {
+  return (
+    <Card className="border-border/70 bg-card/70 shadow-sm">
+      <CardHeader className="pb-2">
+        <CardDescription>Broker policy</CardDescription>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <ShieldCheck className="size-4 text-primary" />
+          Safe writes only
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <ul className="space-y-2 text-sm leading-5 text-muted-foreground">
+          <li>Owned focus, task, and draft moves auto-apply with undo.</li>
+          <li>Meeting moves, deletes, and attendee/location changes require confirmation.</li>
+          <li>Team calendars, non-owned events, and stale etags are rejected.</li>
+        </ul>
+        <div className="mt-3 max-h-48 space-y-2 overflow-auto pr-1">
+          {props.decisions.slice(0, 8).map((decision) => (
+            <div className="rounded-lg border border-border/60 bg-background/35 p-2.5 text-sm" key={decision.id}>
+              <div className="flex items-center justify-between gap-2">
+                <strong className="truncate text-xs font-medium text-foreground">{decision.policy}</strong>
+                <Badge variant={decision.status === 'applied' ? 'success' : decision.status === 'rejected' ? 'destructive' : 'warning'}>
+                  {decision.status}
+                </Badge>
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{decision.reason}</p>
+            </div>
+          ))}
+          {props.decisions.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No broker decisions yet.</p>
+          ) : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AgentRuntimeBoundaryPanel(props: { agentSession: unknown }) {
+  return (
+    <Card className="border-border/70 bg-card/70 shadow-sm">
+      <CardHeader className="pb-2">
+        <CardDescription>Agent runtime boundary</CardDescription>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Bot className="size-4 text-primary" />
+          Planner isolation
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm leading-5 text-muted-foreground">
+          ACA hosts stable services. Foundry hosted agents run as isolated planner sessions and still cannot write
+          the calendar directly.
+        </p>
+        <pre className="mt-3 max-h-44 overflow-auto rounded-lg border border-border/60 bg-background/65 p-3 text-[11px] leading-5 text-muted-foreground">
+          {JSON.stringify(props.agentSession, null, 2)}
+        </pre>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AgentWorkPanel(props: Pick<AppState, 'intents' | 'readinessJobs'>) {
+  return (
+    <Card className="border-border/70 bg-card/70 shadow-sm">
+      <CardHeader className="pb-2">
+        <CardDescription>Queue</CardDescription>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Activity className="size-4 text-primary" />
+          Agent work
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-3 md:grid-cols-2">
+        <DebugList
+          title="Planning intents"
+          empty="No planning intents yet."
+          items={props.intents.slice(0, 6).map((intent) => ({
+            id: intent.id,
+            title: intent.summary,
+            meta: `${intent.status} - ${formatClock(intent.createdAt)}`,
+          }))}
+        />
+        <DebugList
+          title="Readiness jobs"
+          empty="No readiness jobs yet."
+          items={props.readinessJobs.slice(0, 6).map((job) => ({
+            id: job.id,
+            title: job.currentStep ?? job.meetingId,
+            meta: `${job.status} - ${job.completedSteps.length} step${job.completedSteps.length === 1 ? '' : 's'}`,
+          }))}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+function AuditTrailPanel(props: { audit: AppState['audit'] }) {
+  return (
+    <Card className="border-border/70 bg-card/70 shadow-sm">
+      <CardHeader className="pb-2">
+        <CardDescription>Audit trail</CardDescription>
+        <CardTitle className="text-base">Broker and agent activity</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="max-h-[42vh] space-y-2 overflow-auto pr-1">
+          {props.audit.map((entry) => (
+            <div className="grid gap-2 rounded-lg border border-border/60 bg-background/35 p-2.5 text-sm sm:grid-cols-[4rem_7rem_1fr]" key={entry.id}>
+              <span className="text-xs text-muted-foreground">{formatClock(entry.at)}</span>
+              <strong className="truncate text-xs font-medium text-primary">{entry.actor}</strong>
+              <p className="m-0 leading-5 text-muted-foreground">{entry.message}</p>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DebugList(props: {
+  title: string;
+  empty: string;
+  items: Array<{ id: string; title: string; meta: string }>;
+}) {
+  return (
+    <div>
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{props.title}</h3>
+      {props.items.length === 0 ? (
+        <p className="rounded-lg border border-border/60 bg-background/35 p-3 text-sm text-muted-foreground">{props.empty}</p>
+      ) : (
+        <div className="space-y-2">
+          {props.items.map((item) => (
+            <div className="rounded-lg border border-border/60 bg-background/35 p-2.5 text-sm" key={item.id}>
+              <strong className="line-clamp-2 text-foreground">{item.title}</strong>
+              <span className="mt-1 block text-xs text-muted-foreground">{item.meta}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DebugJsonCard(props: { title: string; description?: string; value: unknown }) {
+  return (
+    <Card className="border-border/70 bg-card/70 shadow-sm">
+      <CardHeader className="pb-2">
+        <CardDescription>{props.description ?? 'Debug JSON'}</CardDescription>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Bug className="size-4 text-primary" />
+          {props.title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <pre className="max-h-80 overflow-auto rounded-lg border border-border/60 bg-background/65 p-3 text-[11px] leading-5 text-muted-foreground">
+          {JSON.stringify(props.value, null, 2)}
+        </pre>
       </CardContent>
     </Card>
   );
@@ -1238,12 +1508,11 @@ function EventBlock(props: {
     >
       <strong className="truncate text-sm font-semibold">{props.event.title}</strong>
       <span className="truncate text-xs text-current/70">{formatRange(props.event.start, props.event.end)}</span>
-      <small className="truncate text-[11px] text-current/60">
-        {props.event.kind}
-        {props.event.attendees.length ? ` - ${props.event.attendees.length} attendees` : ''}
-        {props.optimisticStatus === 'planning' ? ' - planning' : ''}
-        {props.optimisticStatus === 'pending-confirmation' ? ' - pending confirmation' : ''}
-      </small>
+      {props.optimisticStatus ? (
+        <small className="truncate text-[11px] text-current/60">
+          {props.optimisticStatus === 'planning' ? 'planning' : 'pending confirmation'}
+        </small>
+      ) : null}
       {props.event.kind === 'meeting' ? (
         <button
           type="button"
@@ -1497,24 +1766,6 @@ function DeleteConfirmationModal(props: {
         </div>
       </div>
     </div>
-  );
-}
-
-function Metric(props: { label: string; value: number; tone: 'good' | 'hold' | 'bad'; icon: React.ReactNode }) {
-  const toneClass = {
-    good: 'text-emerald-300',
-    hold: 'text-amber-300',
-    bad: 'text-rose-300',
-  }[props.tone];
-
-  return (
-    <Card className="min-w-28 border-border/70 bg-card/70 p-3 shadow-sm backdrop-blur">
-      <div className={cn('mb-2 flex items-center justify-between', toneClass)}>
-        {props.icon}
-        <strong className="text-2xl font-semibold leading-none">{props.value}</strong>
-      </div>
-      <span className="block text-xs leading-4 text-muted-foreground">{props.label}</span>
-    </Card>
   );
 }
 
