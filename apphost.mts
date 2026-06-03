@@ -30,6 +30,7 @@ const api = await builder
     .withRunScript('dev')
     .withComputeEnvironment(aca)
     .withEnvironment('CALENDAR_STORE', 'postgres')
+    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-broker-api')
     .withReference(calendarDb)
     .waitFor(calendarDb)
     .withHttpEndpoint({ name: 'http', env: 'PORT' })
@@ -97,6 +98,7 @@ let planner = builder
     .withRunScript('dev')
     .withEnvironment('API_BASE_URL', api.getEndpoint('http'))
     .withEnvironment('PLANNER_MODE', plannerMode)
+    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-worker')
     .withEnvironment('FOUNDRY_USER_ISOLATION_KEY', foundryUserIsolationKey)
     .withEnvironment('FOUNDRY_CHAT_ISOLATION_KEY', foundryChatIsolationKey)
     .waitFor(api);
