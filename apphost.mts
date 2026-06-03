@@ -8,16 +8,26 @@ import {
 } from './.aspire/modules/aspire.mjs';
 
 const builder = await createBuilder();
+const executionContext = await builder.executionContext();
+const isRunMode = await executionContext.isRunMode();
+const isPublishMode = await executionContext.isPublishMode();
 
 const aca = await builder.addAzureContainerAppEnvironment('aca');
-const postgres = builder.addPostgres('postgres').withDataVolume().withPgWeb();
-const calendarDb = postgres.addDatabase('calendar');
-const plannerMode = builder.addParameter('plannerMode', { value: 'local', publishValueAsDefault: true });
-const foundryUserIsolationKey = builder.addParameter('foundryUserIsolationKey', { value: 'user-alex', publishValueAsDefault: true });
-const foundryChatIsolationKey = builder.addParameter('foundryChatIsolationKey', { value: 'chat-build-2026', publishValueAsDefault: true });
-const useFoundryHostedAgent = process.env.ENABLE_FOUNDRY_HOSTED_AGENT === 'true';
-const foundry = useFoundryHostedAgent ? await builder.addFoundry('foundry') : undefined;
-const foundryProject = foundry ? await foundry.addProject('calendar-planning') : undefined;
+const calendarDatabaseName = 'calendar';
+let postgres = builder
+    .addPostgres('postgres')
+    .withEnvironment('POSTGRES_DB', calendarDatabaseName);
+if (isRunMode) {
+    postgres = postgres.withDataVolume();
+}
+postgres = postgres
+    .withComputeEnvironment(aca)
+    .withPgWeb({ configureContainer: async (pgweb) => { await pgweb.withComputeEnvironment(aca); } });
+const calendarDb = postgres.addDatabase(calendarDatabaseName);
+const deployWithFoundry = isPublishMode || process.env.ENABLE_FOUNDRY_HOSTED_AGENT === 'true';
+const plannerMode = builder.addParameter('plannerMode', { value: deployWithFoundry ? 'foundry-hosted' : 'local', publishValueAsDefault: true });
+const foundry = deployWithFoundry ? await builder.addFoundry('foundry') : undefined;
+const foundryProject = foundry ? await foundry.addProject('calendarplanning') : undefined;
 const chat = foundryProject ? await foundryProject.addModelDeployment('chat', FoundryModels.OpenAI.Gpt5Mini) : undefined;
 
 if (foundryProject && chat) {
@@ -32,15 +42,22 @@ The calendar broker validates ownership, permissions, stale etags, and confirmat
     });
 }
 
-const api = await builder
-    .addNodeApp('api', './services/api', 'src/server.ts')
+let apiResource = builder
+    .addNodeApp('api', './services/api', 'dist/server.js')
     .withRunScript('dev')
+    .withBuildScript('build')
     .withComputeEnvironment(aca)
     .withEnvironment('CALENDAR_STORE', 'postgres')
     .withEnvironment('OTEL_SERVICE_NAME', 'calendar-broker-api')
-    .withReference(calendarDb)
-    .waitFor(calendarDb)
+    .withReference(calendarDb);
+
+if (isRunMode) {
+    apiResource = apiResource.waitFor(calendarDb);
+}
+
+const api = await apiResource
     .withHttpEndpoint({ name: 'http', env: 'PORT' })
+    .withHttpHealthCheck({ path: '/readiness' })
     .withUrlForEndpoint('http', async (url) => {
         url.displayText = 'Calendar broker API';
     })
@@ -115,44 +132,65 @@ await api.withHttpCommand('/api/demo/clear-events', 'Clear calendar', {
     resultMode: HttpCommandResultMode.Json,
 });
 
-let planner = builder
-    .addNodeApp('planner', './services/planner', 'src/worker.ts')
-    .withRunScript('dev')
-    .withEnvironment('API_BASE_URL', api.getEndpoint('http'))
-    .withEnvironment('PLANNER_MODE', plannerMode)
-    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-worker')
-    .withEnvironment('FOUNDRY_USER_ISOLATION_KEY', foundryUserIsolationKey)
-    .withEnvironment('FOUNDRY_CHAT_ISOLATION_KEY', foundryChatIsolationKey)
-    .waitFor(api);
-
+let hostedAgent;
 if (foundryProject && chat) {
-    planner = planner
-        .withHttpEndpoint({ name: 'http', targetPort: 8088, env: 'DEFAULT_AD_PORT' })
-        .withReference(foundryProject)
+    hostedAgent = builder
+        .addNodeApp('planner-agent', './services/planner', 'dist/worker.js')
+        .withRunScript('dev')
+        .withBuildScript('build')
+        .withEnvironment('PLANNER_ROLE', 'agent')
+        .withEnvironment('PLANNER_MODE', 'foundry-hosted')
+        .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-agent')
+        .withHttpEndpoint({ name: 'http', targetPort: 8088, env: 'PORT' })
+        .withHttpHealthCheck({ path: '/readiness' })
         .withReference(chat)
         .asHostedAgent(foundryProject, {
-            description: 'Meeting readiness hosted-agent runtime. Emits suggestions and broker-reviewed CalendarPatch proposals.',
+            description: 'Meeting readiness hosted-agent runtime. Emits broker-reviewed readiness suggestions and CalendarPatch proposals.',
             cpu: 0.5,
             memory: 1,
             metadata: {
                 demo: 'build-2026-aspire-agents',
                 authority: 'calendar-broker',
             },
-            environmentVariables: {
-                PLANNER_MODE: 'foundry-hosted',
-            },
-            protocols: [{ protocol: 'responses', version: '1.0.0' }],
+            protocols: [{ protocol: 'invocations', version: '1.0.0' }],
         });
+}
+
+let planner = builder
+    .addNodeApp('planner', './services/planner', 'dist/worker.js')
+    .withRunScript('dev')
+    .withBuildScript('build')
+    .withComputeEnvironment(aca)
+    .withEnvironment('API_BASE_URL', api.getEndpoint('http'))
+    .withEnvironment('PLANNER_ROLE', 'worker')
+    .withEnvironment('PLANNER_MODE', plannerMode)
+    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-worker');
+
+if (isRunMode) {
+    planner = planner.waitFor(api);
+}
+
+if (foundryProject && chat && hostedAgent) {
+    planner = planner
+        .withEnvironment('PLANNER_AGENT_ENDPOINT', hostedAgent.getEndpoint('http'))
+        .withReference(hostedAgent)
+        .withReference(foundryProject)
+        .withReference(chat);
 }
 
 await planner;
 
-await builder
+let web = builder
     .addViteApp('web', './apps/web')
     .withComputeEnvironment(aca)
     .withEnvironment('API_BASE_URL', api.getEndpoint('http'))
-    .withReference(api)
-    .waitFor(api)
+    .withReference(api);
+
+if (isRunMode) {
+    web = web.waitFor(api);
+}
+
+await web
     .withExternalHttpEndpoints()
     .withUrlForEndpoint('http', async (url) => {
         url.displayText = 'Calendar assistant';

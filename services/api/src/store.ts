@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
 import type { Pool as PgPool, PoolClient, PoolConfig } from 'pg';
+import type { BrowserSession } from './sessions';
 import {
   type AppState,
   type AuditEntry,
@@ -18,7 +19,6 @@ import {
   type ReadinessSuggestion,
   appStateSchema,
   createSeedState,
-  demoSessionId,
   demoUserId,
   evaluatePatch,
   id,
@@ -26,7 +26,7 @@ import {
   nextEtag,
   primaryCalendarId,
   teamCalendarId,
-} from '@build2026/shared';
+} from './shared';
 
 const { Pool } = pg;
 
@@ -40,8 +40,11 @@ export class CalendarStore {
   readonly postgresResourceName: string;
   #state: AppState | undefined;
   #pool: PgPool | undefined;
+  #postgresConfig: ResolvedPostgresConfig | undefined;
+  #databaseReady = false;
   #schemaReady = false;
   #loggedStore = false;
+  #fileUpdateReady: Promise<void> = Promise.resolve();
   #listeners = new Set<StateListener>();
 
   constructor(stateDirectory = defaultStateDirectory()) {
@@ -54,9 +57,10 @@ export class CalendarStore {
         throw new Error(`CALENDAR_STORE=postgres but no PostgreSQL environment was found for "${this.postgresResourceName}".`);
       }
       this.mode = 'postgres';
+      this.#postgresConfig = postgresConfig;
       this.#pool = new Pool(postgresConfig.config);
       this.statePath = undefined;
-      this.logStore(`PostgreSQL "${this.postgresResourceName}" via ${postgresConfig.source}`);
+      this.logStore(`PostgreSQL "${this.postgresResourceName}" via ${postgresConfig.source} (${describePostgresConfig(postgresConfig.config)})`);
     } else if (requestedStore === undefined || requestedStore === 'file') {
       this.mode = 'file';
       this.statePath = path.join(stateDirectory, 'calendar-state.json');
@@ -137,6 +141,21 @@ export class CalendarStore {
       return this.updatePostgres(mutator);
     }
 
+    const previousUpdate = this.#fileUpdateReady;
+    let releaseUpdate!: () => void;
+    this.#fileUpdateReady = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    await previousUpdate;
+
+    try {
+      return await this.updateFile(mutator);
+    } finally {
+      releaseUpdate();
+    }
+  }
+
+  private async updateFile(mutator: (state: AppState) => void): Promise<AppState> {
     const state = await this.load();
     mutator(state);
     state.version += 1;
@@ -670,15 +689,16 @@ export class CalendarStore {
     return must(staleDecision, 'Conflict decision was not created.');
   }
 
-  async agentSessionSummary(): Promise<Record<string, unknown>> {
+  async agentSessionSummary(session: BrowserSession): Promise<Record<string, unknown>> {
     const state = await this.load();
+    const latestJob = state.readinessJobs.find((job) => job.sessionId === session.sessionId) ?? state.readinessJobs[0] ?? null;
     const hosted = state.proposals.find((proposal) => proposal.hostedAgentSession)?.hostedAgentSession;
     return {
       runtime: process.env.PLANNER_MODE === 'foundry-hosted' ? 'foundry-hosted' : 'local',
-      userIsolationKey: process.env.FOUNDRY_USER_ISOLATION_KEY ?? demoUserId,
-      chatIsolationKey: process.env.FOUNDRY_CHAT_ISOLATION_KEY ?? demoSessionId,
+      browserSession: session,
+      latestReadinessJob: latestJob,
       hostedAgentSession: hosted ?? null,
-      note: 'Isolation keys partition hosted-agent resources. The broker still owns calendar authorization.',
+      note: 'The browser has an HttpOnly cookie. The API maps it to this public session, and the worker keeps Foundry agent_session_id affinity server-side.',
     };
   }
 
@@ -818,6 +838,7 @@ export class CalendarStore {
 
       if (result.rowCount === 0) {
         const seed = createSeedState();
+        console.log('[broker] No calendar state found; seeding default demo calendar state.');
         await client.query(
           'INSERT INTO calendar_app_state (id, data, updated_at) VALUES ($1, $2::jsonb, now())',
           [singletonStateId, JSON.stringify(seed)],
@@ -901,6 +922,7 @@ export class CalendarStore {
       return;
     }
 
+    console.log('[broker] Ensuring PostgreSQL schema "calendar_app_state" exists.');
     await client.query(`
       CREATE TABLE IF NOT EXISTS calendar_app_state (
         id text PRIMARY KEY,
@@ -909,11 +931,87 @@ export class CalendarStore {
       )
     `);
     this.#schemaReady = true;
+    console.log('[broker] PostgreSQL schema is ready.');
   }
 
   private async connectPostgres(): Promise<PoolClient> {
     const pool = must(this.#pool, 'PostgreSQL pool was not configured.');
-    return pool.connect();
+    const attempts = postgresConnectAttempts();
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        await this.ensurePostgresDatabase();
+        const client = await pool.connect();
+        if (attempt > 1) {
+          console.log(`[broker] PostgreSQL connection succeeded on attempt ${attempt}.`);
+        }
+        return client;
+      } catch (error) {
+        if (!isTransientPostgresStartupError(error) || attempt === attempts) {
+          console.error(`[broker] PostgreSQL connection failed on attempt ${attempt}/${attempts}.`, error);
+          throw error;
+        }
+
+        const delayMs = postgresRetryDelayMs(attempt);
+        console.warn(
+          `[broker] PostgreSQL is not ready yet (${describePostgresError(error)}). Retrying in ${delayMs}ms (${attempt}/${attempts}).`,
+        );
+        await delay(delayMs);
+      }
+    }
+
+    throw new Error('PostgreSQL connection retry loop exited unexpectedly.');
+  }
+
+  private async ensurePostgresDatabase(): Promise<void> {
+    if (this.#databaseReady) {
+      return;
+    }
+
+    const resolved = must(this.#postgresConfig, 'PostgreSQL config was not resolved.');
+    const database = postgresDatabaseName(resolved.config);
+    const maintenanceDatabase = process.env.POSTGRES_MAINTENANCE_DATABASE ?? process.env.CALENDAR_MAINTENANCE_DATABASE ?? 'postgres';
+
+    if (database === maintenanceDatabase) {
+      this.#databaseReady = true;
+      return;
+    }
+
+    console.log(`[broker] Ensuring PostgreSQL database "${database}" exists via maintenance database "${maintenanceDatabase}".`);
+    const maintenancePool = new Pool({ ...resolved.config, database: maintenanceDatabase });
+
+    try {
+      const client = await maintenancePool.connect();
+      try {
+        const result = await client.query<{ exists: boolean }>(
+          'SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1) AS exists',
+          [database],
+        );
+
+        if (result.rows[0]?.exists) {
+          console.log(`[broker] PostgreSQL database "${database}" already exists.`);
+        } else {
+          console.log(`[broker] Creating PostgreSQL database "${database}".`);
+          await client.query(`CREATE DATABASE ${quotePostgresIdentifier(database)}`);
+          console.log(`[broker] PostgreSQL database "${database}" created.`);
+        }
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      if (postgresErrorCode(error) === '42P04') {
+        console.log(`[broker] PostgreSQL database "${database}" was created by another startup attempt.`);
+      } else {
+        if (!isTransientPostgresStartupError(error)) {
+          console.error(`[broker] Failed to ensure PostgreSQL database "${database}" exists.`, error);
+        }
+        throw error;
+      }
+    } finally {
+      await maintenancePool.end();
+    }
+
+    this.#databaseReady = true;
   }
 
   private publish(state: AppState): void {
@@ -1642,8 +1740,11 @@ function resolvePostgresConfig(resourceName: string): ResolvedPostgresConfig | u
     };
   }
 
-  const uri = firstEnvEntry(`${prefix}_URI`, 'DATABASE_URL', 'POSTGRES_URL');
-  return uri ? { config: { connectionString: uri.value }, source: uri.name } : undefined;
+  return undefined;
+}
+
+function describePostgresConfig(config: PoolConfig): string {
+  return `host=${config.host ?? '(default)'} port=${config.port ?? '(default)'} database=${config.database ?? '(default)'} user=${config.user ?? '(default)'}`;
 }
 
 function envPrefix(resourceName: string): string {
@@ -1651,17 +1752,66 @@ function envPrefix(resourceName: string): string {
 }
 
 function firstEnv(...names: string[]): string | undefined {
-  return firstEnvEntry(...names)?.value;
-}
-
-function firstEnvEntry(...names: string[]): { name: string; value: string } | undefined {
   for (const name of names) {
     const value = process.env[name];
     if (value) {
-      return { name, value };
+      return value;
     }
   }
   return undefined;
+}
+
+function postgresDatabaseName(config: PoolConfig): string {
+  return must(config.database, 'PostgreSQL database was not configured.');
+}
+
+function postgresConnectAttempts(): number {
+  const configured = Number(process.env.CALENDAR_POSTGRES_CONNECT_ATTEMPTS ?? 60);
+  return Number.isInteger(configured) && configured > 0 ? configured : 60;
+}
+
+function postgresRetryDelayMs(attempt: number): number {
+  return Math.min(5000, 500 * 2 ** Math.min(attempt - 1, 4));
+}
+
+function quotePostgresIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function postgresErrorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : undefined;
+}
+
+function isTransientPostgresStartupError(error: unknown): boolean {
+  const code = postgresErrorCode(error);
+  return (
+    code === 'ECONNREFUSED'
+    || code === 'ECONNRESET'
+    || code === 'ENOTFOUND'
+    || code === 'ETIMEDOUT'
+    || code === 'EAI_AGAIN'
+    || code === '57P03'
+    || code === '53300'
+    || code === '08000'
+    || code === '08001'
+    || code === '08006'
+  );
+}
+
+function describePostgresError(error: unknown): string {
+  const code = postgresErrorCode(error);
+  if (code) {
+    return `code ${code}`;
+  }
+  return error instanceof Error ? error.message : 'unknown error';
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
 }
 
 function isMissingFile(error: unknown): boolean {

@@ -6,11 +6,11 @@
   "scripts": {
     "dev": "tsx watch src/worker.ts",
     "start": "node dist/worker.js",
-    "build": "tsc -p tsconfig.json --noEmit",
+    "build": "esbuild src/worker.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/worker.js --external:@azure/identity --external:@opentelemetry/* --external:zod",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@build2026/shared": "file:../../packages/shared",
+    "@azure/identity": "^4.13.1",
     "@opentelemetry/auto-instrumentations-node": "^0.76.0",
     "@opentelemetry/exporter-metrics-otlp-grpc": "^0.218.0",
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.218.0",

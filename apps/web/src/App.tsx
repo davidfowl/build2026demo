@@ -1,5 +1,5 @@
 import { type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, Bot, Bug, CalendarPlus, CheckCircle2, Clock3, ListChecks, ShieldCheck, Trash2, XCircle } from 'lucide-react';
+import { Activity, Bot, Bug, CalendarPlus, CheckCircle2, Clock3, KeyRound, ListChecks, RefreshCw, ShieldCheck, Trash2, UserRound, XCircle } from 'lucide-react';
 import {
   type AppState,
   type BookMeetingRequest,
@@ -8,11 +8,9 @@ import {
   type MeetingReadinessJob,
   type ReadinessSuggestion,
   appStateSchema,
-  demoSessionId,
-  demoUserId,
   minutesBetween,
   primaryCalendarId,
-} from '@build2026/shared';
+} from './shared';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -73,6 +71,20 @@ type BookMeetingResponse = {
   job: MeetingReadinessJob;
 };
 
+type BrowserSession = {
+  userId: string;
+  sessionId: string;
+  name: string;
+  cookie: {
+    name: string;
+    httpOnly: boolean;
+    sameSite: string;
+    secure: boolean;
+    maxAgeSeconds: number;
+    value: 'server-only';
+  };
+};
+
 type DecisionMetrics = {
   applied: number;
   pending: number;
@@ -122,6 +134,8 @@ export function App() {
   const [deletingEvent, setDeletingEvent] = useState(false);
   const [toast, setToast] = useState<Toast | undefined>();
   const [debugOpen, setDebugOpen] = useState(false);
+  const [browserSession, setBrowserSession] = useState<BrowserSession | undefined>();
+  const [resettingSession, setResettingSession] = useState(false);
   const dragRef = useRef<DragState | undefined>(undefined);
   const toastId = useRef(0);
 
@@ -137,7 +151,10 @@ export function App() {
     () => displayedEvents.filter((event) => dateKey(event.start) === selectedDate),
     [displayedEvents, selectedDate],
   );
-  const draftMeeting = useMemo(() => createDraftMeeting(newMeeting, selectedDate), [newMeeting, selectedDate]);
+  const draftMeeting = useMemo(
+    () => createDraftMeeting(newMeeting, selectedDate, state?.userId ?? 'user-alex'),
+    [newMeeting, selectedDate, state?.userId],
+  );
   const draftHasConflict = useMemo(
     () => displayedEvents.some((event) => dateKey(event.start) === dateKey(draftMeeting.start) && eventsOverlap(event, draftMeeting)),
     [displayedEvents, draftMeeting],
@@ -173,6 +190,10 @@ export function App() {
     const next = appStateSchema.parse(await api('/api/state'));
     setState(next);
     setSelectedId((current) => current && !next.events.some((event) => event.id === current) ? '' : current);
+  }, []);
+
+  const loadSession = useCallback(async () => {
+    setBrowserSession(await api('/api/session') as BrowserSession);
   }, []);
 
   useEffect(() => {
@@ -219,6 +240,7 @@ export function App() {
   }, [deleteCandidate, draftPlaced]);
 
   useEffect(() => {
+    void loadSession();
     void loadState();
     const events = new EventSource('/api/stream');
     events.addEventListener('state', (message) => {
@@ -232,7 +254,7 @@ export function App() {
       events.close();
       window.clearInterval(interval);
     };
-  }, [loadState]);
+  }, [loadSession, loadState]);
 
   useEffect(() => {
     if (!state) {
@@ -336,8 +358,6 @@ export function App() {
     await api('/api/intents', {
       method: 'POST',
       body: JSON.stringify({
-        userId: demoUserId,
-        sessionId: demoSessionId,
         eventId: event.id,
         desiredStart,
         desiredEnd,
@@ -367,10 +387,7 @@ export function App() {
   async function startReadiness(event: CalendarEvent) {
     await api(`/api/meetings/${event.id}/readiness`, {
       method: 'POST',
-      body: JSON.stringify({
-        userId: demoUserId,
-        sessionId: demoSessionId,
-      }),
+      body: JSON.stringify({}),
     });
     showToast(`Meeting readiness agent queued for "${event.title}".`);
   }
@@ -388,8 +405,6 @@ export function App() {
       const result = await api(`/api/events/${event.id}/delete`, {
         method: 'POST',
         body: JSON.stringify({
-          userId: demoUserId,
-          sessionId: demoSessionId,
           confirmed: true,
         }),
       }) as { decision?: BrokerDecision };
@@ -420,6 +435,19 @@ export function App() {
         titleInput.focus();
         titleInput.reportValidity();
       }
+
+      async function resetSession() {
+        setResettingSession(true);
+        try {
+          setBrowserSession(await api('/api/session/reset', { method: 'POST' }) as BrowserSession);
+          showToast('Started a new browser session cookie.');
+          await loadState();
+        } catch (error) {
+          showToast(error instanceof Error ? error.message : 'Could not reset browser session.');
+        } finally {
+          setResettingSession(false);
+        }
+      }
       showToast('Add a meeting title before booking.');
       return;
     }
@@ -433,16 +461,14 @@ export function App() {
       return;
     }
 
-    const body: BookMeetingRequest = {
-      userId: demoUserId,
-      sessionId: demoSessionId,
+    const body = {
       title,
       start: start.toISOString(),
       end: end.toISOString(),
       attendees: parseAttendees(newMeeting.attendees),
       ...(newMeeting.location.trim() ? { location: newMeeting.location.trim() } : {}),
       ...(newMeeting.description.trim() ? { description: newMeeting.description.trim() } : {}),
-    };
+    } satisfies Omit<BookMeetingRequest, 'userId' | 'sessionId'>;
 
     setBookingMeeting(true);
     try {
@@ -500,14 +526,23 @@ export function App() {
               </p>
             </div>
           </div>
-          <Button
-            variant={debugOpen ? 'secondary' : 'outline'}
-            onClick={() => setDebugOpen((current) => !current)}
-            aria-pressed={debugOpen}
-          >
-            <Bug className="size-4" />
-            {debugOpen ? 'Close dev tools' : 'Dev tools'}
-          </Button>
+          <div className="flex flex-col gap-2 sm:items-end">
+            <SessionBadge session={browserSession} />
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={() => void resetSession()} disabled={resettingSession}>
+                <RefreshCw className={cn('size-4', resettingSession && 'animate-spin')} />
+                New session
+              </Button>
+              <Button
+                variant={debugOpen ? 'secondary' : 'outline'}
+                onClick={() => setDebugOpen((current) => !current)}
+                aria-pressed={debugOpen}
+              >
+                <Bug className="size-4" />
+                {debugOpen ? 'Close dev tools' : 'Dev tools'}
+              </Button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -661,6 +696,7 @@ export function App() {
       {debugOpen ? (
         <DebugView
           state={state}
+          session={browserSession}
           selectedEvent={selectedEvent}
           metrics={metrics}
           onConfirm={(decision) => void confirm(decision)}
@@ -700,6 +736,41 @@ export function App() {
     }));
     await createIntent(event, start.toISOString(), end.toISOString());
   }
+}
+
+function SessionBadge(props: { session: BrowserSession | undefined }) {
+  if (!props.session) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-background/45 px-3 py-2 text-xs text-muted-foreground">
+        <UserRound className="size-4" />
+        Loading browser session...
+      </div>
+    );
+  }
+
+  const cookieFlags = [
+    props.session.cookie.httpOnly ? 'HttpOnly' : undefined,
+    props.session.cookie.secure ? 'Secure' : undefined,
+    `SameSite=${props.session.cookie.sameSite}`,
+  ].filter(Boolean).join(' / ');
+
+  return (
+    <div className="rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-xs shadow-sm">
+      <div className="flex flex-wrap items-center gap-2 text-primary">
+        <UserRound className="size-4" />
+        <strong className="text-sm text-foreground">{props.session.name}</strong>
+        <Badge variant="secondary">session {props.session.sessionId}</Badge>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-muted-foreground">
+        <KeyRound className="size-3.5" />
+        <span>user {props.session.userId}</span>
+        <span aria-hidden="true">·</span>
+        <span>cookie {props.session.cookie.name}</span>
+        <span aria-hidden="true">·</span>
+        <span>{cookieFlags}; value hidden from JS</span>
+      </div>
+    </div>
+  );
 }
 
 function NewMeetingCard(props: {
@@ -1171,6 +1242,7 @@ function PendingConfirmationsPanel(props: {
 
 function DebugView(props: {
   state: AppState;
+  session: BrowserSession | undefined;
   selectedEvent: CalendarEvent | undefined;
   metrics: DecisionMetrics;
   onConfirm: (decision: BrokerDecision) => void;
@@ -1195,6 +1267,7 @@ function DebugView(props: {
     userId: props.state.userId,
     sessionId: props.state.sessionId,
     selectedEvent: props.selectedEvent ?? null,
+    browserSession: props.session ?? null,
     agentSession,
     intents: props.state.intents,
     proposals: props.state.proposals,
@@ -1272,6 +1345,7 @@ function DebugView(props: {
         {activeTab === 'runtime' ? (
           <div className="grid gap-4 xl:grid-cols-2">
             <AgentRuntimeBoundaryPanel agentSession={agentSession} />
+            <DebugJsonCard title="Browser session" value={props.session ?? null} />
             <AgentWorkPanel intents={props.state.intents} readinessJobs={props.state.readinessJobs} />
             <DebugJsonCard title="Agent session" value={agentSession} />
             <DebugJsonCard title="Latest proposal" value={latestProposal} />
@@ -1354,13 +1428,13 @@ function AgentRuntimeBoundaryPanel(props: { agentSession: unknown }) {
         <CardDescription>Agent runtime boundary</CardDescription>
         <CardTitle className="flex items-center gap-2 text-base">
           <Bot className="size-4 text-primary" />
-          Planner isolation
+          Planner session
         </CardTitle>
       </CardHeader>
       <CardContent>
         <p className="text-sm leading-5 text-muted-foreground">
-          ACA hosts stable services. Foundry hosted agents run as isolated planner sessions and still cannot write
-          the calendar directly.
+          The API owns an HttpOnly browser session cookie and the worker keeps Foundry agent session affinity
+          server-side. The agent still cannot write the calendar directly.
         </p>
         <pre className="mt-3 max-h-44 overflow-auto rounded-lg border border-border/60 bg-background/65 p-3 text-[11px] leading-5 text-muted-foreground">
           {JSON.stringify(props.agentSession, null, 2)}
@@ -1772,6 +1846,7 @@ function DeleteConfirmationModal(props: {
 async function api(path: string, init: RequestInit = {}): Promise<unknown> {
   const response = await fetch(path, {
     ...init,
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
       ...init.headers,
@@ -1789,7 +1864,7 @@ function latestAgentSession(state: AppState): unknown {
     runtime: 'local',
     queuedReadinessJobs: state.readinessJobs.filter((job) => job.status === 'queued').length,
     latestReadinessJob: state.readinessJobs[0] ?? null,
-    note: 'Enable Foundry hosted agents in the AppHost to show hosted planner isolation for meeting readiness.',
+    note: 'The API stamps jobs with the cookie-backed browser session; Foundry agent_session_id stays server-side.',
   };
 }
 
@@ -1810,14 +1885,14 @@ function buildWeekDays(events: CalendarEvent[]): Array<{ key: string; label: str
   });
 }
 
-function createDraftMeeting(form: NewMeetingForm, selectedDate: string): CalendarEvent {
+function createDraftMeeting(form: NewMeetingForm, selectedDate: string, ownerId: string): CalendarEvent {
   const title = form.title.trim() || 'New meeting';
   const start = dateTimeFromFields(form.dateKey || selectedDate, form.startTime);
   const end = new Date(start.getTime() + form.durationMinutes * 60000);
   return {
     id: 'draft-new-meeting',
     calendarId: primaryCalendarId,
-    ownerId: demoUserId,
+    ownerId,
     title,
     kind: 'meeting',
     start: start.toISOString(),
