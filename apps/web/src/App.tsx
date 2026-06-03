@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, CalendarPlus, CheckCircle2, Clock3, ShieldCheck, Trash2, XCircle } from 'lucide-react';
 import {
   type AppState,
@@ -28,7 +28,10 @@ const startTimeOptions = Array.from(
   { length: Math.floor(((dayEndHour - dayStartHour) * 60 - 30) / snapMinutes) + 1 },
   (_, index) => timeFromMinutes(dayStartHour * 60 + index * snapMinutes),
 );
-const durationOptions = [30, 45, 60, 90];
+const durationOptions = Array.from(
+  { length: ((dayEndHour - dayStartHour) * 60) / snapMinutes },
+  (_, index) => (index + 1) * snapMinutes,
+);
 const inputClassName = 'mt-1 w-full rounded-md border border-border/60 bg-background/65 px-2.5 py-2 text-sm text-foreground shadow-sm outline-none transition placeholder:text-muted-foreground focus:border-primary/60 focus:ring-2 focus:ring-primary/20';
 
 type DragState = {
@@ -407,6 +410,11 @@ export function App() {
   async function bookMeeting() {
     const title = newMeeting.title.trim();
     if (!title) {
+      const titleInput = document.getElementById('new-meeting-title');
+      if (titleInput instanceof HTMLInputElement) {
+        titleInput.focus();
+        titleInput.reportValidity();
+      }
       showToast('Add a meeting title before booking.');
       return;
     }
@@ -542,6 +550,10 @@ export function App() {
           onDraftMove={(startTime) => {
             setSelectedId('');
             setNewMeeting((current) => ({ ...current, dateKey: selectedDate, startTime }));
+          }}
+          onDraftResize={(startTime, durationMinutes) => {
+            setSelectedId('');
+            setNewMeeting((current) => ({ ...current, dateKey: selectedDate, startTime, durationMinutes }));
           }}
           onDismissDraft={() => setDraftPlaced(false)}
           onBlockedSlot={() => {
@@ -791,6 +803,7 @@ function NewMeetingCard(props: {
           <label className="block text-xs font-medium text-muted-foreground">
             Title
             <input
+              id="new-meeting-title"
               className={inputClassName}
               value={props.form.title}
               onChange={(event) => props.onChange({ title: event.target.value })}
@@ -883,7 +896,9 @@ function NewMeetingCard(props: {
             {props.draftHasConflict
               ? 'That draft overlaps an existing meeting. Drag across an open slot before booking.'
               : props.draftPlaced
-                ? 'Drag the draft to move it, use the trash button to discard it, or press Escape.'
+                ? props.form.title.trim()
+                  ? 'Drag the draft to move it, drag its edges to resize it, use the trash button to discard it, or press Escape.'
+                  : 'Add a meeting title before booking this draft.'
                 : 'Drag across an open time range on the calendar to place a draft.'}
           </p>
         </form>
@@ -908,6 +923,7 @@ function CalendarBoard(props: {
   onDragStart: (event: CalendarEvent, pointerOffsetMinutes: number, timelineTop: number) => void;
   onDraftSlotChange: (startTime: string, durationMinutes: number) => void;
   onDraftMove: (startTime: string) => void;
+  onDraftResize: (startTime: string, durationMinutes: number) => void;
   onDismissDraft: () => void;
   onBlockedSlot: () => void;
   onBookDraft: () => void;
@@ -1056,6 +1072,13 @@ function CalendarBoard(props: {
                   return;
                 }
                 props.onDraftMove(startTime);
+              }}
+              onResize={(startTime, durationMinutes) => {
+                if (!isOpenSlotForDraftRange(props.events, startTime, durationMinutes, props.visibleDate)) {
+                  props.onBlockedSlot();
+                  return;
+                }
+                props.onDraftResize(startTime, durationMinutes);
               }}
               onDismiss={props.onDismissDraft}
               onBook={props.onBookDraft}
@@ -1246,20 +1269,66 @@ function DraftMeetingBlock(props: {
   hasConflict: boolean;
   previewOnly?: boolean;
   onMove?: (startTime: string) => void;
+  onResize?: (startTime: string, durationMinutes: number) => void;
   onDismiss?: () => void;
   onBook: () => void;
 }) {
-  const height = Math.max(minutesBetween(props.event.start, props.event.end) * pixelsPerMinute, 48);
-  const duration = minutesBetween(props.event.start, props.event.end);
-  const [previewStartTime, setPreviewStartTime] = useState<string | undefined>();
-  const displayEvent = previewStartTime
-    ? {
-      ...props.event,
-      start: dateTimeFromFields(dateKey(props.event.start), previewStartTime).toISOString(),
-      end: dateAtMinutes(props.event.start, minutesFromTime(previewStartTime) + duration).toISOString(),
+  const startMinutes = minutesFromStart(props.event.start);
+  const endMinutes = minutesFromStart(props.event.end);
+  const duration = endMinutes - startMinutes;
+  const [previewRange, setPreviewRange] = useState<{ startMinutes: number; endMinutes: number } | undefined>();
+  const displayStartMinutes = previewRange?.startMinutes ?? startMinutes;
+  const displayEndMinutes = previewRange?.endMinutes ?? endMinutes;
+  const displayEvent = {
+    ...props.event,
+    start: dateAtMinutes(props.event.start, displayStartMinutes).toISOString(),
+    end: dateAtMinutes(props.event.start, displayEndMinutes).toISOString(),
+  };
+  const displayTop = (displayStartMinutes - dayStartHour * 60) * pixelsPerMinute;
+  const height = Math.max((displayEndMinutes - displayStartMinutes) * pixelsPerMinute, 48);
+
+  function startResize(edge: 'start' | 'end', event: ReactPointerEvent<HTMLButtonElement>) {
+    if (props.previewOnly || !props.onResize || props.busy) {
+      return;
     }
-    : props.event;
-  const displayTop = (minutesFromStart(displayEvent.start) - dayStartHour * 60) * pixelsPerMinute;
+    const timeline = event.currentTarget.closest('[data-timeline]');
+    if (!(timeline instanceof HTMLElement)) {
+      return;
+    }
+    const rect = timeline.getBoundingClientRect();
+    let latestStart = startMinutes;
+    let latestEnd = endMinutes;
+    let moved = false;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const onMove = (moveEvent: PointerEvent) => {
+      moved = moved || Math.abs(moveEvent.clientY - event.clientY) > 4;
+      const pointerMinutes = snap(dayStartHour * 60 + (moveEvent.clientY - rect.top) / pixelsPerMinute);
+      if (edge === 'start') {
+        latestStart = clamp(pointerMinutes, dayStartHour * 60, endMinutes - snapMinutes);
+        latestEnd = endMinutes;
+      } else {
+        latestStart = startMinutes;
+        latestEnd = clamp(pointerMinutes, startMinutes + snapMinutes, dayEndHour * 60);
+      }
+      if (moved) {
+        setPreviewRange({ startMinutes: latestStart, endMinutes: latestEnd });
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      setPreviewRange(undefined);
+      if (!moved) {
+        return;
+      }
+      props.onResize?.(timeFromMinutes(latestStart), latestEnd - latestStart);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
+  }
 
   return (
     <div
@@ -1300,13 +1369,13 @@ function DraftMeetingBlock(props: {
             dayEndHour * 60 - duration,
           );
           if (moved) {
-            setPreviewStartTime(timeFromMinutes(latestStart));
+            setPreviewRange({ startMinutes: latestStart, endMinutes: latestStart + duration });
           }
         };
         const onUp = () => {
           window.removeEventListener('pointermove', onMove);
           window.removeEventListener('pointerup', onUp);
-          setPreviewStartTime(undefined);
+          setPreviewRange(undefined);
           if (!moved) {
             return;
           }
@@ -1326,32 +1395,53 @@ function DraftMeetingBlock(props: {
         {props.hasConflict ? ' - drag across an open slot' : ''}
       </span>
       {props.previewOnly ? null : (
-        <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1.5">
+        <>
           <button
             type="button"
-            className="inline-flex size-7 items-center justify-center rounded-md border border-rose-300/30 bg-rose-950/70 text-rose-100 shadow-sm transition hover:bg-rose-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200/70"
-            aria-label={`Discard draft meeting ${props.event.title}`}
-            title="Discard draft"
-            onClick={(event) => {
-              event.stopPropagation();
-              props.onDismiss?.();
-            }}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <Trash2 className="size-3.5" />
-          </button>
+            className="absolute inset-x-3 top-1 h-1.5 cursor-ns-resize rounded-full bg-amber-100/30 transition hover:bg-amber-100/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-100/70 disabled:cursor-not-allowed"
+            aria-label="Adjust draft start time"
+            title="Drag to adjust start time"
+            disabled={props.busy}
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => startResize('start', event)}
+          />
           <button
             type="button"
-            className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:opacity-60"
-            disabled={props.busy || props.hasConflict}
-            onClick={(event) => {
-              event.stopPropagation();
-              props.onBook();
-            }}
-          >
-            {props.busy ? 'Booking...' : 'Book'}
-          </button>
-        </div>
+            className="absolute inset-x-3 bottom-1 h-1.5 cursor-ns-resize rounded-full bg-amber-100/30 transition hover:bg-amber-100/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-100/70 disabled:cursor-not-allowed"
+            aria-label="Adjust draft end time"
+            title="Drag to adjust end time"
+            disabled={props.busy}
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => startResize('end', event)}
+          />
+          <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1.5">
+            <button
+              type="button"
+              className="inline-flex size-7 items-center justify-center rounded-md border border-rose-300/30 bg-rose-950/70 text-rose-100 shadow-sm transition hover:bg-rose-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200/70"
+              aria-label={`Discard draft meeting ${props.event.title}`}
+              title="Discard draft"
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onDismiss?.();
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <Trash2 className="size-3.5" />
+            </button>
+            <button
+              type="button"
+              className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:opacity-60"
+              disabled={props.busy || props.hasConflict}
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onBook();
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              {props.busy ? 'Booking...' : 'Book'}
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -1508,9 +1598,13 @@ function isOpenSlot(events: CalendarEvent[], startMinutes: number, endMinutes: n
 
 function isOpenSlotForDraft(events: CalendarEvent[], draft: CalendarEvent, startTime: string, day: string): boolean {
   const duration = minutesBetween(draft.start, draft.end);
+  return isOpenSlotForDraftRange(events, startTime, duration, day);
+}
+
+function isOpenSlotForDraftRange(events: CalendarEvent[], startTime: string, durationMinutes: number, day: string): boolean {
   const start = minutesFromTime(startTime);
   const dayEvents = events.filter((event) => dateKey(event.start) === day);
-  return isOpenSlot(dayEvents, start, start + duration);
+  return isOpenSlot(dayEvents, start, start + durationMinutes);
 }
 
 function findOpenStartTime(events: CalendarEvent[], day: string, durationMinutes: number, preferredStartMinutes: number): string {
