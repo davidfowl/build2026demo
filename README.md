@@ -29,7 +29,7 @@ Aspire models:
 - `pgweb` — dashboard-launchable PostgreSQL inspection UI.
 - `planner` — background planner/agent worker that runs readiness tools and emits suggestions.
 - `aca` — Azure Container Apps deployment environment for the stable app services.
-- Dashboard HTTP commands on `api`: seed calendar, generate a Build-themed week, clear calendar events, trigger meeting readiness, simulate stale etag conflict, inspect agent session.
+- Dashboard HTTP commands on `api`: seed calendar, generate a Build-themed week, clear calendar events, trigger meeting readiness, simulate stale etag conflict, inspect the active browser/agent session.
 
 ## Demo beats
 
@@ -39,14 +39,14 @@ Aspire models:
 4. Accept a calendar-changing suggestion: the broker validates the agent's `CalendarPatch` before adding the prep or travel block.
 5. Hover a meeting, click the trash button, and approve the delete modal to show destructive changes still run through broker validation.
 6. Run **Simulate stale etag conflict** to show the same broker boundary still rejects unsafe patches.
-7. Inspect the agent session: hosted-agent isolation keys are visible, but the broker remains the calendar authorization boundary.
+7. Inspect the agent session: the browser gets an HttpOnly cookie-backed session projection, while the Foundry `agent_session_id` stays server-side.
 8. Move the planner to the Foundry-hosted-agent model when you want to show the managed agent runtime:
 
 ```bash
 ENABLE_FOUNDRY_HOSTED_AGENT=true aspire start --isolated
 ```
 
-That adds `foundry`, a `calendar-planning` project, a `chat` model deployment, a prompt agent, and publishes the planner as a Foundry hosted agent. The default local run leaves this off so the first half of the demo is reliable offline.
+That adds `foundry`, a `calendarplanning` project, a `chat` model deployment, a prompt agent, and publishes the planner as a Foundry hosted agent. The default local run leaves this off so the first half of the demo is reliable offline.
 
 8. Deploy shape:
 

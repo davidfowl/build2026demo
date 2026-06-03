@@ -6,11 +6,10 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
-    "build": "tsc -p tsconfig.json --noEmit",
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/server.js --external:@opentelemetry/* --external:cors --external:express --external:pg --external:pg-native --external:zod",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@build2026/shared": "file:../../packages/shared",
     "@opentelemetry/auto-instrumentations-node": "^0.76.0",
     "@opentelemetry/exporter-metrics-otlp-grpc": "^0.218.0",
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.218.0",

@@ -18,6 +18,7 @@ if (otlpEndpoint) {
 
   try {
     sdk.start();
+    console.log(`[otel] OpenTelemetry export enabled for ${process.env.OTEL_SERVICE_NAME ?? 'calendar-broker-api'}.`);
   } catch (error) {
     console.error('[otel] failed to start OpenTelemetry SDK', error);
   }
@@ -30,4 +31,6 @@ if (otlpEndpoint) {
 
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
+} else {
+  console.warn('[otel] OTEL_EXPORTER_OTLP_ENDPOINT is not set; OpenTelemetry export is disabled.');
 }

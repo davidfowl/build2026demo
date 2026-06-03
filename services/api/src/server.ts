@@ -11,13 +11,16 @@ import {
   readinessProgressRequestSchema,
   readinessResultRequestSchema,
   submitProposalRequestSchema,
-} from '@build2026/shared';
+} from './shared';
+import { getOrCreateBrowserSession, resetBrowserSession } from './sessions';
 import { BrokerError, CalendarStore } from './store';
 
 const port = Number(process.env.PORT ?? 4310);
 const store = new CalendarStore();
 const app = express();
+let ready = false;
 
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
@@ -25,11 +28,34 @@ app.get('/health', (_request, response) => {
   response.json({ ok: true, service: 'calendar-broker' });
 });
 
-app.get('/api/state', async (_request, response) => {
+app.get('/readiness', (_request, response) => {
+  if (!ready) {
+    response.status(503).json({ status: 'starting', service: 'calendar-broker' });
+    return;
+  }
+
+  response.json({ status: 'ready', service: 'calendar-broker' });
+});
+
+app.get('/liveness', (_request, response) => {
+  response.json({ status: 'alive', service: 'calendar-broker' });
+});
+
+app.get('/api/session', (request, response) => {
+  response.json(getOrCreateBrowserSession(request, response));
+});
+
+app.post('/api/session/reset', (request, response) => {
+  response.json(resetBrowserSession(request, response));
+});
+
+app.get('/api/state', async (request, response) => {
+  getOrCreateBrowserSession(request, response);
   response.json(await store.load());
 });
 
 app.get('/api/stream', async (request, response) => {
+  getOrCreateBrowserSession(request, response);
   response.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
@@ -48,32 +74,43 @@ app.get('/api/stream', async (request, response) => {
 
 app.post('/api/intents', async (request, response) => {
   const body = createIntentRequestSchema.parse(request.body);
-  const intent = await store.createIntent(body);
+  const session = getOrCreateBrowserSession(request, response);
+  const intent = await store.createIntent({ ...body, userId: session.userId, sessionId: session.sessionId });
   response.status(202).json({ intent });
 });
 
 app.post('/api/meetings', async (request, response) => {
   const body = bookMeetingRequestSchema.parse(request.body);
-  response.status(201).json(await store.bookMeeting(body));
+  const session = getOrCreateBrowserSession(request, response);
+  response.status(201).json(await store.bookMeeting({ ...body, userId: session.userId, sessionId: session.sessionId }));
 });
 
 app.post('/api/events/:eventId/delete', async (request, response) => {
   const body = deleteEventRequestSchema.parse(request.body);
-  response.status(202).json({ decision: await store.requestDeleteEvent(request.params.eventId, body) });
+  const session = getOrCreateBrowserSession(request, response);
+  response.status(202).json({
+    decision: await store.requestDeleteEvent(request.params.eventId, { ...body, userId: session.userId, sessionId: session.sessionId }),
+  });
 });
 
 app.post('/api/meetings/:meetingId/readiness', async (request, response) => {
   const body = createReadinessJobRequestSchema.parse(request.body);
+  const session = getOrCreateBrowserSession(request, response);
   const job = await store.createReadinessJob({
     ...body,
+    userId: session.userId,
+    sessionId: session.sessionId,
     meetingId: request.params.meetingId,
   });
+  console.log(`[broker] Queued readiness job ${job.id} meeting=${job.meetingId} session=${job.sessionId} createdBy=${job.createdBy}.`);
   response.status(202).json({ job });
 });
 
 app.post('/api/readiness-jobs/:jobId/suggestions/:suggestionId/accept', async (request, response) => {
+  const decision = await store.acceptReadinessSuggestion(request.params.jobId, request.params.suggestionId);
+  console.log(`[broker] Accepted readiness suggestion ${request.params.suggestionId} for job=${request.params.jobId}; decision=${decision.status} policy=${decision.policy}.`);
   response.json({
-    decision: await store.acceptReadinessSuggestion(request.params.jobId, request.params.suggestionId),
+    decision,
   });
 });
 
@@ -117,27 +154,34 @@ app.get('/api/planner/next-readiness-job', async (request, response) => {
     response.status(204).send();
     return;
   }
+  console.log(`[broker] Claimed readiness job ${claimed.job.id} for worker=${workerId} meeting=${claimed.job.meetingId} session=${claimed.job.sessionId}.`);
   response.json(claimed);
 });
 
 app.post('/api/planner/readiness-jobs/:jobId/progress', async (request, response) => {
   const body = readinessProgressRequestSchema.parse(request.body);
+  const job = await store.recordReadinessProgress(request.params.jobId, body);
+  console.log(`[broker] Readiness job ${job.id} progress step=${body.stepId} label="${body.label}".`);
   response.json({
-    job: await store.recordReadinessProgress(request.params.jobId, body),
+    job,
   });
 });
 
 app.post('/api/planner/readiness-jobs/:jobId/result', async (request, response) => {
   const body = readinessResultRequestSchema.parse(request.body);
+  const job = await store.completeReadinessJob(request.params.jobId, body.suggestions);
+  console.log(`[broker] Readiness job ${job.id} completed with ${body.suggestions.length} suggestion(s): ${body.suggestions.map((suggestion) => suggestion.title).join(' | ')}`);
   response.status(202).json({
-    job: await store.completeReadinessJob(request.params.jobId, body.suggestions),
+    job,
   });
 });
 
 app.post('/api/planner/readiness-jobs/:jobId/fail', async (request, response) => {
   const body = readinessFailureRequestSchema.parse(request.body);
+  const job = await store.failReadinessJob(request.params.jobId, body.error);
+  console.error(`[broker] Readiness job ${job.id} failed: ${body.error}`);
   response.json({
-    job: await store.failReadinessJob(request.params.jobId, body.error),
+    job,
   });
 });
 
@@ -218,12 +262,12 @@ app.post('/api/demo/clear-pending', async (_request, response) => {
   response.json({ cleared: await store.clearPending() });
 });
 
-app.get('/api/demo/agent-session', async (_request, response) => {
-  response.json(await store.agentSessionSummary());
+app.get('/api/demo/agent-session', async (request, response) => {
+  response.json(await store.agentSessionSummary(getOrCreateBrowserSession(request, response)));
 });
 
-app.post('/api/demo/agent-session', async (_request, response) => {
-  response.json(await store.agentSessionSummary());
+app.post('/api/demo/agent-session', async (request, response) => {
+  response.json(await store.agentSessionSummary(getOrCreateBrowserSession(request, response)));
 });
 
 app.use(((error: unknown, _request: Request, response: Response, _next) => {
@@ -241,8 +285,18 @@ app.use(((error: unknown, _request: Request, response: Response, _next) => {
   response.status(500).json({ error: 'Unexpected broker error.' });
 }) satisfies ErrorRequestHandler);
 
-await store.load();
-app.listen(port, () => {
-  console.log(`[broker] Calendar broker listening on http://localhost:${port}`);
-  console.log('[broker] Calendar writes are authorized here; planners only submit CalendarPatch proposals.');
-});
+try {
+  console.log(`[broker] Starting calendar broker on port ${port}.`);
+  console.log('[broker] Loading calendar store.');
+  await store.load();
+  ready = true;
+  app.listen(port, () => {
+    console.log(`[broker] Calendar broker listening on http://localhost:${port}`);
+    console.log('[broker] Calendar writes are authorized here; planners only submit CalendarPatch proposals.');
+  });
+} catch (error) {
+  ready = false;
+  console.error('[broker] Calendar broker startup failed.', error);
+  process.exitCode = 1;
+  throw error;
+}

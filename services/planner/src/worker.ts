@@ -1,30 +1,37 @@
 import './otel';
 import { createServer } from 'node:http';
+import type { IncomingMessage } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   type AppState,
   type CalendarEvent,
   type CalendarPatch,
+  type HostedAgentContext,
   type MeetingReadinessJob,
   type PatchProposal,
   type PlanningIntent,
   type ReadinessSuggestion,
   appStateSchema,
   calendarEventSchema,
-  demoSessionId,
-  demoUserId,
+  hostedAgentContextSchema,
+  hostedAgentInvocationRequestSchema,
+  hostedAgentInvocationResponseSchema,
   id,
   intentSchema,
   meetingReadinessJobSchema,
   minutesBetween,
   moveWindow,
-} from '@build2026/shared';
+  readinessSuggestionSchema,
+} from './shared';
 
 const apiBaseUrl = withoutTrailingSlash(process.env.API_BASE_URL ?? 'http://localhost:4310');
 const plannerMode = process.env.PLANNER_MODE === 'foundry-hosted' ? 'foundry-hosted' : 'local';
+const plannerRole = process.env.PLANNER_ROLE === 'agent' ? 'agent' : 'worker';
 const workerId = `${plannerMode}-planner-${process.pid}`;
 const pollMs = Number(process.env.PLANNER_POLL_MS ?? 2000);
 const toolDelayMs = Number(process.env.READINESS_TOOL_DELAY_MS ?? 750);
+const hostedAgentSessions = new Map<string, string>();
 
 const calendarWindowSchema = z.object({
   start: z.string(),
@@ -61,11 +68,14 @@ const materialsSchema = z.object({
 });
 type MeetingMaterials = z.infer<typeof materialsSchema>;
 
-console.log(`[planner] ${workerId} using ${apiBaseUrl}`);
+console.log(`[planner] ${workerId} role=${plannerRole} mode=${plannerMode} using ${apiBaseUrl}`);
 console.log('[planner] Planner is not a calendar write authority; it emits CalendarPatch[] proposals and readiness suggestions.');
-startHostedAgentEndpoint();
 
-await Promise.all([runPlanningLoop(), runReadinessLoop()]);
+if (plannerRole === 'agent') {
+  await startHostedAgentServer();
+} else {
+  await Promise.all([runPlanningLoop(), runReadinessLoop()]);
+}
 
 async function runPlanningLoop(): Promise<void> {
   for (;;) {
@@ -89,38 +99,55 @@ async function runReadinessLoop(): Promise<void> {
   }
 }
 
-function startHostedAgentEndpoint(): void {
-  const portValue = process.env.DEFAULT_AD_PORT;
-  if (!portValue) {
-    return;
-  }
+async function startHostedAgentServer(): Promise<never> {
+  const port = Number(process.env.PORT ?? process.env.DEFAULT_AD_PORT ?? 8088);
 
-  const port = Number(portValue);
   createServer(async (request, response) => {
-    if (request.method === 'GET' && request.url === '/health') {
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ ok: true, workerId, mode: plannerMode }));
-      return;
-    }
+    try {
+      if (request.method === 'GET' && ['/health', '/readiness', '/liveness'].includes(request.url ?? '')) {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ status: 'ready', workerId, mode: plannerMode }));
+        return;
+      }
 
-    if (request.method === 'POST' && request.url?.startsWith('/responses')) {
-      const state = await fetchState();
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({
-        role: 'meeting-readiness-planner',
-        mode: plannerMode,
-        instruction: 'Run meeting-readiness tools, return suggestions, and emit CalendarPatch[] only for calendar changes. The broker applies or rejects patches.',
-        queuedIntents: state.intents.filter((intent) => intent.status === 'queued').length,
-        queuedReadinessJobs: state.readinessJobs.filter((job) => job.status === 'queued').length,
-      }));
-      return;
-    }
+      if (request.method === 'POST' && request.url?.includes('/invocations')) {
+        const body = hostedAgentInvocationRequestSchema.parse(await readJsonBody(request));
+        const context = extractHostedAgentContext(body);
+        const sessionId = getHostedAgentSessionId(request.url, body);
+        console.log(`[planner-agent] invocation received job=${context.job.id} meeting=${context.meeting.id} session=${sessionId}.`);
+        const suggestions = createReadinessSuggestions(
+          context.job,
+          context.meeting,
+          context.calendarWindow,
+          context.weather,
+          context.travel,
+          context.materials,
+        );
+        const content = JSON.stringify({ suggestions });
+        console.log(`[planner-agent] invocation completed job=${context.job.id} suggestions=${suggestions.length}: ${suggestionTitles(suggestions)}`);
 
-    response.writeHead(404, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ error: 'not found' }));
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({
+          invocation_id: randomUUID(),
+          session_id: sessionId,
+          output: { role: 'assistant', content },
+          suggestions,
+        }));
+        return;
+      }
+
+      response.writeHead(404, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ error: 'not found' }));
+    } catch (error) {
+      console.error('[planner-agent] invocation failed', error);
+      response.writeHead(400, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Invalid hosted-agent request.' }));
+    }
   }).listen(port, () => {
-    console.log(`[planner] hosted-agent responses endpoint listening on http://localhost:${port}/responses`);
+    console.log(`[planner-agent] invocations endpoint listening on http://localhost:${port}/invocations`);
   });
+
+  return new Promise<never>(() => undefined);
 }
 
 async function processOneIntent(): Promise<void> {
@@ -171,6 +198,7 @@ async function processOneReadinessJob(): Promise<void> {
 
   const claimed = await claimedResponse.json() as unknown;
   const job = meetingReadinessJobSchema.parse((claimed as { job: unknown }).job);
+  console.log(`[planner] claimed readiness job ${job.id} meeting=${job.meetingId} session=${job.sessionId}.`);
 
   try {
     await runReadinessAnalysis(job);
@@ -181,56 +209,86 @@ async function processOneReadinessJob(): Promise<void> {
 }
 
 async function runReadinessAnalysis(job: MeetingReadinessJob): Promise<void> {
-  if (!(await recordProgress(job.id, 'meeting', 'Reading meeting details', 'Loaded title, attendees, location, and agenda notes.'))) {
+  console.log(`[planner] starting readiness analysis job=${job.id} meeting=${job.meetingId} mode=${plannerMode}.`);
+  const context = await loadReadinessContext(job);
+  if (!context) {
+    console.log(`[planner] readiness job ${job.id} stopped before context load completed.`);
     return;
   }
+  console.log(`[planner] loaded readiness context job=${job.id} meeting="${context.meeting.title}" calendarEvents=${context.calendarWindow.events.length} weather="${context.weather.condition}" travelMinutes=${context.travel.travelMinutes}.`);
+
+  let suggestions: ReadinessSuggestion[];
+  if (plannerMode === 'foundry-hosted') {
+    if (!(await recordProgress(job.id, 'hosted-agent', 'Invoking Foundry hosted agent', 'Sent the scoped meeting context to the isolated hosted-agent session.'))) {
+      return;
+    }
+    suggestions = await invokeHostedAgent(context);
+    if (!(await recordProgress(job.id, 'agent-result', 'Received hosted-agent result', `Validated ${suggestions.length} readiness suggestion(s) from the hosted agent.`))) {
+      return;
+    }
+  } else {
+    if (!(await recordProgress(job.id, 'scoring', 'Scoring readiness suggestions', 'Ranked prep time, weather, travel, and agenda/materials recommendations.'))) {
+      return;
+    }
+    if (!(await continueAfterDelay(job.id))) {
+      return;
+    }
+    suggestions = createReadinessSuggestions(
+      context.job,
+      context.meeting,
+      context.calendarWindow,
+      context.weather,
+      context.travel,
+      context.materials,
+    );
+  }
+
+  await postJson(`/api/planner/readiness-jobs/${encodeURIComponent(job.id)}/result`, { suggestions });
+  console.log(`[planner] completed readiness job ${job.id} with ${suggestions.length} suggestion(s): ${suggestionTitles(suggestions)}`);
+}
+
+async function loadReadinessContext(job: MeetingReadinessJob): Promise<HostedAgentContext | undefined> {
+  if (!(await recordProgress(job.id, 'meeting', 'Reading meeting details', 'Loaded title, attendees, location, and agenda notes.'))) {
+    return undefined;
+  }
   if (!(await continueAfterDelay(job.id))) {
-    return;
+    return undefined;
   }
   const meeting = calendarEventSchema.parse(await fetchJson(`/api/agent/meetings/${encodeURIComponent(job.meetingId)}`));
 
   if (!(await recordProgress(job.id, 'calendar-window', 'Scanning the 7-day calendar', 'Looked for open focus windows and risky adjacent meetings.'))) {
-    return;
+    return undefined;
   }
   if (!(await continueAfterDelay(job.id))) {
-    return;
+    return undefined;
   }
   const calendarWindow = calendarWindowSchema.parse(await fetchJson(`/api/agent/calendar-window?meetingId=${encodeURIComponent(job.meetingId)}&days=7`));
 
   if (!(await recordProgress(job.id, 'weather', 'Checking meeting-day weather', 'Pulled location-specific weather so the advice is useful on the day.'))) {
-    return;
+    return undefined;
   }
   if (!(await continueAfterDelay(job.id))) {
-    return;
+    return undefined;
   }
   const weather = weatherSchema.parse(await fetchJson(`/api/agent/weather?meetingId=${encodeURIComponent(job.meetingId)}`));
 
   if (!(await recordProgress(job.id, 'travel', 'Estimating travel and setup buffer', 'Compared the previous event with the meeting location.'))) {
-    return;
+    return undefined;
   }
   if (!(await continueAfterDelay(job.id))) {
-    return;
+    return undefined;
   }
   const travel = travelSchema.parse(await fetchJson(`/api/agent/travel?meetingId=${encodeURIComponent(job.meetingId)}`));
 
   if (!(await recordProgress(job.id, 'materials', 'Reviewing agenda and materials', 'Checked the meeting notes for a checklist and open questions.'))) {
-    return;
+    return undefined;
   }
   if (!(await continueAfterDelay(job.id))) {
-    return;
+    return undefined;
   }
   const materials = materialsSchema.parse(await fetchJson(`/api/agent/materials?meetingId=${encodeURIComponent(job.meetingId)}`));
 
-  if (!(await recordProgress(job.id, 'scoring', 'Scoring readiness suggestions', 'Ranked prep time, weather, travel, and agenda/materials recommendations.'))) {
-    return;
-  }
-  if (!(await continueAfterDelay(job.id))) {
-    return;
-  }
-  const suggestions = createReadinessSuggestions(job, meeting, calendarWindow, weather, travel, materials);
-
-  await postJson(`/api/planner/readiness-jobs/${encodeURIComponent(job.id)}/result`, { suggestions });
-  console.log(`[planner] completed readiness job ${job.id} with ${suggestions.length} suggestion(s)`);
+  return hostedAgentContextSchema.parse({ job, meeting, calendarWindow, weather, travel, materials });
 }
 
 async function recordProgress(jobId: string, stepId: string, label: string, detail: string): Promise<boolean> {
@@ -274,6 +332,186 @@ async function postJson(path: string, body: unknown): Promise<unknown> {
     throw new Error(`${path} failed: ${response.status} ${await response.text()}`);
   }
   return response.json();
+}
+
+async function invokeHostedAgent(context: HostedAgentContext): Promise<ReadinessSuggestion[]> {
+  const endpoint = resolveHostedAgentEndpoint();
+  const affinityKey = stableAgentSessionId(context.job);
+  const existingAgentSessionId = hostedAgentSessions.get(affinityKey);
+  const invocationUrl = buildInvocationUrl(endpoint, existingAgentSessionId);
+  const invocationHost = new URL(invocationUrl).host;
+  const body = JSON.stringify({ context, session_id: affinityKey });
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const startedAt = Date.now();
+    console.log(`[planner] invoking Foundry hosted agent job=${context.job.id} attempt=${attempt + 1} host=${invocationHost} browserSession=${context.job.sessionId} foundrySession=${existingAgentSessionId ? 'reused' : 'new'}.`);
+    const response = await fetch(invocationUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...await hostedAgentAuthHeaders(invocationUrl),
+      },
+      body,
+    });
+    const text = await response.text();
+    const payload = text ? JSON.parse(text) as unknown : undefined;
+    console.log(`[planner] Foundry hosted agent response job=${context.job.id} attempt=${attempt + 1} status=${response.status} durationMs=${Date.now() - startedAt}.`);
+
+    if (response.status === 424 && attempt < 3) {
+      console.log(`[planner] Foundry hosted agent not ready for job=${context.job.id}; retrying.`);
+      await delay(2000);
+      continue;
+    }
+
+    if (!response.ok) {
+      throw new Error(`Hosted agent returned ${response.status}: ${text}`);
+    }
+
+    const returnedSessionId = extractHostedAgentSessionId(payload);
+    if (returnedSessionId) {
+      hostedAgentSessions.set(affinityKey, returnedSessionId);
+    }
+
+    const suggestions = extractHostedAgentSuggestions(payload);
+    console.log(`[planner] Foundry hosted agent returned job=${context.job.id} foundrySession=${returnedSessionId ? 'present' : 'absent'} suggestions=${suggestions.length}: ${suggestionTitles(suggestions)}`);
+    return suggestions;
+  }
+
+  throw new Error('Hosted agent invocation did not complete.');
+}
+
+function suggestionTitles(suggestions: ReadinessSuggestion[]): string {
+  return suggestions.map((suggestion) => `"${suggestion.title}"`).join(', ');
+}
+
+function resolveHostedAgentEndpoint(): string {
+  const explicit = firstEnv(
+    'PLANNER_AGENT_ENDPOINT',
+    'services__planner-agent__http__0',
+    'services__planner_agent__http__0',
+    'PLANNER_AGENT_HTTP',
+    'PLANNER_AGENT_HTTPS',
+    'FOUNDRY_AGENT_ENDPOINT',
+  );
+  if (explicit) {
+    return explicit;
+  }
+
+  const serviceDiscoveryEndpoint = Object.entries(process.env)
+    .filter(([key, value]) => value && key.toLowerCase().includes('planner') && key.toLowerCase().includes('agent'))
+    .map(([, value]) => value)
+    .find((value): value is string => typeof value === 'string' && /^https?:\/\//i.test(value));
+  if (serviceDiscoveryEndpoint) {
+    return serviceDiscoveryEndpoint;
+  }
+
+  throw new Error('PLANNER_MODE=foundry-hosted requires PLANNER_AGENT_ENDPOINT or a planner-agent service reference.');
+}
+
+function buildInvocationUrl(endpoint: string, agentSessionId: string | undefined): string {
+  const base = withoutTrailingSlash(endpoint);
+  const url = new URL(
+    base.includes('/endpoint/protocols/invocations') ? base : `${base}/endpoint/protocols/invocations`,
+  );
+  url.searchParams.set('api-version', 'v1');
+  if (agentSessionId) {
+    url.searchParams.set('agent_session_id', agentSessionId);
+  }
+  return url.toString();
+}
+
+let cachedFoundryToken: { token: string; expiresOnTimestamp: number } | undefined;
+
+async function hostedAgentAuthHeaders(invocationUrl: string): Promise<Record<string, string>> {
+  const url = new URL(invocationUrl);
+  if (process.env.FOUNDRY_AUTH_DISABLED === 'true' || ['localhost', '127.0.0.1', '::1'].includes(url.hostname)) {
+    return {};
+  }
+
+  if (!cachedFoundryToken || Date.now() > cachedFoundryToken.expiresOnTimestamp - 5 * 60 * 1000) {
+    const { DefaultAzureCredential } = await import('@azure/identity');
+    const token = await new DefaultAzureCredential().getToken('https://ai.azure.com/.default');
+    cachedFoundryToken = { token: token.token, expiresOnTimestamp: token.expiresOnTimestamp };
+  }
+
+  return {
+    Authorization: `Bearer ${cachedFoundryToken.token}`,
+    'Foundry-Features': 'HostedAgents=V1Preview',
+  };
+}
+
+function extractHostedAgentSuggestions(payload: unknown): ReadinessSuggestion[] {
+  const parsed = hostedAgentInvocationResponseSchema.safeParse(payload);
+  if (parsed.success && parsed.data.suggestions) {
+    return parsed.data.suggestions;
+  }
+
+  const outputContent = z.object({
+    output: z.object({
+      content: z.string(),
+    }),
+  }).parse(payload).output.content;
+  const contentPayload = JSON.parse(outputContent) as unknown;
+  return z.object({ suggestions: z.array(readinessSuggestionSchema) }).parse(contentPayload).suggestions;
+}
+
+function extractHostedAgentSessionId(payload: unknown): string | undefined {
+  const parsed = hostedAgentInvocationResponseSchema.safeParse(payload);
+  return parsed.success ? parsed.data.session_id : undefined;
+}
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  if (!raw) {
+    return {};
+  }
+
+  return JSON.parse(raw) as unknown;
+}
+
+function extractHostedAgentContext(body: z.infer<typeof hostedAgentInvocationRequestSchema>): HostedAgentContext {
+  if (body.context) {
+    return body.context;
+  }
+
+  if (body.input && typeof body.input === 'object') {
+    return hostedAgentContextSchema.parse(body.input);
+  }
+
+  if (typeof body.input === 'string') {
+    return hostedAgentContextSchema.parse(JSON.parse(body.input));
+  }
+
+  if (body.message) {
+    return hostedAgentContextSchema.parse(JSON.parse(body.message));
+  }
+
+  throw new Error('Hosted-agent invocation requires context, object input, JSON string input, or JSON message.');
+}
+
+function getHostedAgentSessionId(url: string, body: z.infer<typeof hostedAgentInvocationRequestSchema>): string {
+  const requested = new URL(url, 'http://localhost').searchParams.get('agent_session_id');
+  const requestSessionId = 'session_id' in body && typeof body.session_id === 'string' ? body.session_id : undefined;
+  return process.env.FOUNDRY_AGENT_SESSION_ID ?? requested ?? requestSessionId ?? 'local-agent-session';
+}
+
+function stableAgentSessionId(job: MeetingReadinessJob): string {
+  return `${job.userId}-${job.sessionId}`.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 96);
+}
+
+function firstEnv(...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function createProposal(intent: PlanningIntent, event: CalendarEvent, state: AppState): PatchProposal {
@@ -477,21 +715,15 @@ function formatClock(value: string): string {
 }
 
 function hostedAgentSession(intent: PlanningIntent, event: CalendarEvent, patches: CalendarPatch[]): PatchProposal['hostedAgentSession'] {
-  const userIsolationKey = process.env.FOUNDRY_USER_ISOLATION_KEY ?? demoUserId;
-  const chatIsolationKey = process.env.FOUNDRY_CHAT_ISOLATION_KEY ?? demoSessionId;
-
   return {
     provider: 'foundry-hosted-agents',
-    userIsolationKey,
-    chatIsolationKey,
-    sandboxHome: `/home/agent/${userIsolationKey}/${chatIsolationKey}`,
+    calendarUserId: intent.userId,
+    browserSessionId: intent.sessionId,
+    foundrySession: 'server-managed',
     requestPreview: {
       agent: process.env.FOUNDRY_AGENT_ID ?? 'calendar-planner-demo-agent',
       endpoint: process.env.FOUNDRY_AGENT_ENDPOINT ?? 'offline-demo',
-      isolation: {
-        user: userIsolationKey,
-        chat: chatIsolationKey,
-      },
+      affinity: 'cookie-backed browser session, Foundry agent_session_id retained server-side',
       toolContract: 'Return CalendarPatch[] only. Do not call calendar write APIs.',
       input: {
         intent,
