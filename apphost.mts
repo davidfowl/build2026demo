@@ -1,4 +1,11 @@
-import { FoundryModels, HttpCommandResultMode, createBuilder } from './.aspire/modules/aspire.mjs';
+import {
+    FoundryModels,
+    HttpCommandResultMode,
+    InputType,
+    createBuilder,
+    type ExecuteCommandContext,
+    type ExecuteCommandResult,
+} from './.aspire/modules/aspire.mjs';
 
 const builder = await createBuilder();
 
@@ -34,64 +41,79 @@ const api = await builder
     .withReference(calendarDb)
     .waitFor(calendarDb)
     .withHttpEndpoint({ name: 'http', env: 'PORT' })
-    .withExternalHttpEndpoints()
-    .withHttpCommand('/api/demo/seed', 'Seed demo calendar', {
-        commandName: 'seed-demo-calendar',
-        description: 'Reset the local fake calendar provider to the seeded Build 2026 scenario.',
-        iconName: 'Calendar',
-        isHighlighted: true,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
+    .withUrlForEndpoint('http', async (url) => {
+        url.displayText = 'Calendar broker API';
     })
-    .withHttpCommand('/api/demo/generate-build-week', 'Generate Build week calendar', {
-        commandName: 'generate-build-week-calendar',
-        description: 'Replace the calendar with a believable randomized Build-themed week.',
-        confirmationMessage: 'Replace the current calendar with a generated Build-themed week?',
-        iconName: 'Calendar',
-        isHighlighted: true,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
-    })
-    .withHttpCommand('/api/demo/clear-events', 'Clear calendar events', {
-        commandName: 'clear-calendar-events',
-        description: 'Remove all calendar events and clear readiness/proposal state.',
-        confirmationMessage: 'Clear all calendar events and agent state?',
-        iconName: 'Delete',
-        isHighlighted: true,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
-    })
-    .withHttpCommand('/api/demo/trigger-readiness', 'Trigger meeting readiness', {
-        commandName: 'trigger-meeting-readiness',
-        description: 'Queue the long-running meeting readiness agent for the seeded Build 2026 review.',
-        iconName: 'Bot',
-        isHighlighted: true,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
-    })
-    .withHttpCommand('/api/demo/simulate-conflict', 'Simulate stale etag conflict', {
-        commandName: 'simulate-calendar-conflict',
-        description: 'Optional safety-boundary proof: create a stale-etag patch so the broker rejects it.',
-        confirmationMessage: 'Create a stale proposal and reject it through broker policy?',
-        iconName: 'Warning',
-        isHighlighted: false,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
-    })
-    .withHttpCommand('/api/demo/agent-session', 'Inspect agent session', {
-        commandName: 'inspect-agent-session',
-        description: 'Show the Foundry hosted-agent isolation keys and latest request shape.',
-        iconName: 'Bot',
-        isHighlighted: true,
-        methodName: 'POST',
-        endpointName: 'http',
-        resultMode: HttpCommandResultMode.Json,
-    });
+    .withExternalHttpEndpoints();
+
+await api.withCommand(
+    'set-demo-calendar',
+    'Set demo calendar',
+    async (context: ExecuteCommandContext): Promise<ExecuteCommandResult> => {
+        const args = await context.arguments();
+        const mode = await args.requiredValue('mode');
+
+        let path: string;
+        let message: string;
+
+        switch (mode) {
+            case 'reset':
+                path = '/api/demo/seed';
+                message = 'Reset calendar to the seeded Build 2026 scenario.';
+                break;
+            case 'random':
+                path = '/api/demo/generate-build-week';
+                message = 'Generated a randomized Build-themed calendar week.';
+                break;
+            default:
+                return { success: false, message: `Unsupported calendar mode '${mode}'.` };
+        }
+
+        const endpoint = await api.getEndpoint('http');
+        const url = await endpoint.url();
+        const response = await fetch(new URL(path, url), { method: 'POST' });
+
+        if (!response.ok) {
+            return {
+                success: false,
+                message: `Calendar broker API returned ${response.status} ${response.statusText}.`,
+            };
+        }
+
+        return { success: true, message };
+    },
+    {
+        commandOptions: {
+            description: 'Choose whether to restore the seeded Build 2026 calendar or generate a randomized week.',
+            iconName: 'Calendar',
+            isHighlighted: true,
+            arguments: [
+                {
+                    name: 'mode',
+                    label: 'Calendar setup',
+                    inputType: InputType.Choice,
+                    required: true,
+                    value: 'reset',
+                    options: [
+                        { key: 'reset', value: 'Reset to seeded Build 2026 scenario' },
+                        { key: 'random', value: 'Generate random Build-themed week' },
+                    ],
+                },
+            ],
+        },
+    },
+);
+
+await api.withHttpCommand('/api/demo/clear-events', 'Clear calendar', {
+    commandName: 'clear-calendar',
+    description: 'Remove all calendar events and clear readiness/proposal state.',
+    confirmationMessage: 'Clear all calendar events and agent state?',
+    iconName: 'Delete',
+    isHighlighted: true,
+    methodName: 'POST',
+    endpointName: 'http',
+    resultMode: HttpCommandResultMode.Json,
+});
 
 let planner = builder
     .addNodeApp('planner', './services/planner', 'src/worker.ts')
@@ -132,6 +154,9 @@ await builder
     .withReference(api)
     .waitFor(api)
     .withExternalHttpEndpoints()
+    .withUrlForEndpoint('http', async (url) => {
+        url.displayText = 'Calendar assistant';
+    })
     .publishAsStaticWebsite({ apiPath: '/api', apiTarget: api })
     .withBrowserLogs();
 
