@@ -48,7 +48,15 @@ ENABLE_FOUNDRY_HOSTED_AGENT=true aspire start --isolated
 
 That adds `foundry`, a `calendarplanning` project, a `chat` model deployment, a prompt agent, and publishes the planner as a Foundry hosted agent. The default local run leaves this off so the first half of the demo is reliable offline.
 
-8. Deploy shape:
+9. Or keep the planner as the app-owned worker and use the GitHub Copilot SDK for model inference against the Foundry `chat` deployment:
+
+```bash
+ENABLE_COPILOT_SDK_INFERENCE=true aspire start --isolated
+```
+
+That adds Foundry and the `chat` model, injects the model reference into `planner`, and runs readiness inference through `@github/copilot-sdk`. It does not create the hosted-agent service; the worker still gathers app context and the broker still validates calendar patches.
+
+10. Deploy shape:
 
 ```bash
 aspire publish

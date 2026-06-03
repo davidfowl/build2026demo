@@ -67,7 +67,7 @@ export const proposalSchema = z.object({
   intentId: z.string(),
   createdAt: z.string(),
   createdBy: z.string(),
-  plannerMode: z.enum(['local', 'foundry-hosted']),
+  plannerMode: z.enum(['local', 'foundry-hosted', 'copilot-sdk']),
   patches: z.array(calendarPatchSchema),
   hostedAgentSession: z
     .object({

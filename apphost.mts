@@ -24,13 +24,26 @@ postgres = postgres
     .withComputeEnvironment(aca)
     .withPgWeb({ configureContainer: async (pgweb) => { await pgweb.withComputeEnvironment(aca); } });
 const calendarDb = postgres.addDatabase(calendarDatabaseName);
-const deployWithFoundry = isPublishMode || process.env.ENABLE_FOUNDRY_HOSTED_AGENT === 'true';
-const plannerMode = builder.addParameter('plannerMode', { value: deployWithFoundry ? 'foundry-hosted' : 'local', publishValueAsDefault: true });
-const foundry = deployWithFoundry ? await builder.addFoundry('foundry') : undefined;
+const useCopilotSdkInference = process.env.ENABLE_COPILOT_SDK_INFERENCE === 'true';
+const useFoundryHostedAgent = !useCopilotSdkInference && (isPublishMode || process.env.ENABLE_FOUNDRY_HOSTED_AGENT === 'true');
+const useFoundry = useFoundryHostedAgent || useCopilotSdkInference;
+const plannerModeValue = useFoundryHostedAgent ? 'foundry-hosted' : useCopilotSdkInference ? 'copilot-sdk' : 'local';
+const plannerMode = builder.addParameter('plannerMode', { value: plannerModeValue, publishValueAsDefault: true });
+const foundry = useFoundry ? await builder.addFoundry('foundry') : undefined;
 const foundryProject = foundry ? await foundry.addProject('calendarplanning') : undefined;
-const chat = foundryProject ? await foundryProject.addModelDeployment('chat', FoundryModels.OpenAI.Gpt5Mini) : undefined;
+const chat = foundry
+    ? useCopilotSdkInference
+        ? await foundry.addDeployment('chat', FoundryModels.OpenAI.Gpt5Mini)
+        : foundryProject
+            ? await foundryProject.addModelDeployment('chat', FoundryModels.OpenAI.Gpt5Mini)
+            : undefined
+    : undefined;
 
-if (foundryProject && chat) {
+if (useCopilotSdkInference && chat) {
+    await chat.skuCapacity.set(10);
+}
+
+if (useFoundryHostedAgent && foundryProject && chat) {
     await foundryProject.addPromptAgent('calendar-policy-planner', chat, {
         instructions: `
 You are the meeting readiness agent for an Aspire Build 2026 demo.
@@ -133,7 +146,7 @@ await api.withHttpCommand('/api/demo/clear-events', 'Clear calendar', {
 });
 
 let hostedAgent;
-if (foundryProject && chat) {
+if (useFoundryHostedAgent && foundryProject && chat) {
     hostedAgent = builder
         .addNodeApp('planner-agent', './services/planner', 'dist/worker.js')
         .withRunScript('dev')
@@ -175,6 +188,11 @@ if (foundryProject && chat && hostedAgent) {
         .withEnvironment('PLANNER_AGENT_ENDPOINT', hostedAgent.getEndpoint('http'))
         .withReference(hostedAgent)
         .withReference(foundryProject)
+        .withReference(chat);
+} else if (foundryProject && chat) {
+    planner = planner
+        .withEnvironment('FOUNDRY_PROJECT_NAME', 'calendarplanning')
+        .withEnvironment('COPILOT_MODEL_ID', 'gpt-5-mini')
         .withReference(chat);
 }
 
