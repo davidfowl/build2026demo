@@ -229,36 +229,48 @@ export const readinessFailureRequestSchema = z.object({
 });
 export type ReadinessFailureRequest = z.infer<typeof readinessFailureRequestSchema>;
 
+export const hostedAgentCalendarWindowSchema = z.object({
+  start: z.string(),
+  end: z.string(),
+  events: z.array(calendarEventSchema),
+});
+export type HostedAgentCalendarWindow = z.infer<typeof hostedAgentCalendarWindowSchema>;
+
+export const hostedAgentWeatherSchema = z.object({
+  location: z.string(),
+  forecastAt: z.string(),
+  condition: z.string(),
+  temperatureF: z.number(),
+  precipitationChance: z.number(),
+  recommendation: z.string(),
+});
+export type HostedAgentWeather = z.infer<typeof hostedAgentWeatherSchema>;
+
+export const hostedAgentTravelSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  previousEvent: z.object({ id: z.string(), title: z.string(), end: z.string() }).nullable(),
+  travelMinutes: z.number(),
+  leaveAt: z.string(),
+  recommendation: z.string(),
+});
+export type HostedAgentTravel = z.infer<typeof hostedAgentTravelSchema>;
+
+export const hostedAgentMaterialsSchema = z.object({
+  topic: z.string(),
+  agendaStatus: z.string(),
+  checklist: z.array(z.string()),
+  openQuestions: z.array(z.string()),
+});
+export type HostedAgentMaterials = z.infer<typeof hostedAgentMaterialsSchema>;
+
 export const hostedAgentContextSchema = z.object({
   job: meetingReadinessJobSchema,
   meeting: calendarEventSchema,
-  calendarWindow: z.object({
-    start: z.string(),
-    end: z.string(),
-    events: z.array(calendarEventSchema),
-  }),
-  weather: z.object({
-    location: z.string(),
-    forecastAt: z.string(),
-    condition: z.string(),
-    temperatureF: z.number(),
-    precipitationChance: z.number(),
-    recommendation: z.string(),
-  }),
-  travel: z.object({
-    from: z.string(),
-    to: z.string(),
-    previousEvent: z.object({ id: z.string(), title: z.string(), end: z.string() }).nullable(),
-    travelMinutes: z.number(),
-    leaveAt: z.string(),
-    recommendation: z.string(),
-  }),
-  materials: z.object({
-    topic: z.string(),
-    agendaStatus: z.string(),
-    checklist: z.array(z.string()),
-    openQuestions: z.array(z.string()),
-  }),
+  calendarWindow: hostedAgentCalendarWindowSchema,
+  weather: hostedAgentWeatherSchema,
+  travel: hostedAgentTravelSchema,
+  materials: hostedAgentMaterialsSchema,
 });
 export type HostedAgentContext = z.infer<typeof hostedAgentContextSchema>;
 
@@ -269,6 +281,42 @@ export const hostedAgentInvocationRequestSchema = z.object({
   session_id: z.string().optional(),
 });
 export type HostedAgentInvocationRequest = z.infer<typeof hostedAgentInvocationRequestSchema>;
+
+const hostedAgentContextJsonStringSchema = z.string().transform((value, context) => {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Expected a JSON string containing hosted-agent context.',
+    });
+    return z.NEVER;
+  }
+}).pipe(hostedAgentContextSchema);
+
+const hostedAgentContextCarrierSchema = z.union([
+  z.object({ context: hostedAgentContextSchema }).transform(({ context }) => context),
+  z.object({ input: hostedAgentContextSchema }).transform(({ input }) => input),
+  z.object({ input: hostedAgentContextJsonStringSchema }).transform(({ input }) => input),
+  z.object({ message: hostedAgentContextJsonStringSchema }).transform(({ message }) => message),
+]);
+
+export const hostedAgentInvocationEnvelopeSchema = hostedAgentInvocationRequestSchema.transform((request, context) => {
+  const parsedContext = hostedAgentContextCarrierSchema.safeParse(request);
+  if (!parsedContext.success) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Hosted-agent invocation requires context, object input, JSON string input, or JSON message.',
+    });
+    return z.NEVER;
+  }
+
+  return {
+    context: parsedContext.data,
+    sessionId: request.session_id,
+  };
+});
+export type HostedAgentInvocationEnvelope = z.infer<typeof hostedAgentInvocationEnvelopeSchema>;
 
 export const hostedAgentInvocationResponseSchema = z.object({
   invocation_id: z.string(),

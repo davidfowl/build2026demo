@@ -27,13 +27,12 @@ const calendarDb = postgres.addDatabase(calendarDatabaseName);
 const foundry = await builder.addFoundry('foundry');
 const foundryProject = await foundry.addProject('calendarplanning');
 const chat = await foundryProject.addModelDeployment('chat', FoundryModels.OpenAI.Gpt5Mini);
+await chat.skuCapacity.set(10);
 
 const weather = await builder
-    .addPythonApp('weather', './services/weather-python', 'main.py')
-    .withPip({ install: true, installArgs: ['-r', 'requirements.txt'] })
+    .addUvicornApp('weather', './services/weather-python', 'main:app')
+    .withUv()
     .withComputeEnvironment(aca)
-    .withEnvironment('OTEL_SERVICE_NAME', 'weather-readiness-python')
-    .withHttpEndpoint({ name: 'http', env: 'PORT' })
     .withUrlForEndpoint('http', async (url) => {
         url.displayText = 'Python weather sidecar';
     });
@@ -50,11 +49,11 @@ The calendar broker validates ownership, permissions, stale etags, and confirmat
 
 const api = await builder
     .addNodeApp('api', './services/api', 'dist/server.js')
+    // Run mode watches TypeScript source; deployment builds the dist entrypoint above.
     .withRunScript('dev')
     .withBuildScript('build')
     .withComputeEnvironment(aca)
     .withEnvironment('CALENDAR_STORE', 'postgres')
-    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-broker-api')
     .withEnvironment('WEATHER_BASE_URL', weather.getEndpoint('http'))
     .withReference(calendarDb)
     .waitFor(calendarDb)
@@ -135,22 +134,20 @@ await api.withHttpCommand('/api/demo/clear-events', 'Clear calendar', {
     resultMode: HttpCommandResultMode.Json,
 });
 
+// planner-agent is the model-execution boundary. In local dev it runs
+// services/planner/src/agent.ts as a Node app; when deployed, asHostedAgent(...)
+// publishes it as a Foundry hosted-agent runtime that serves the invocations protocol.
 const hostedAgent = builder
-    .addNodeApp('planner-agent', './services/planner', 'dist/worker.js')
+    .addNodeApp('planner-agent', './services/planner', 'dist/agent.js')
     .withNpm({ install: false })
-    .withRunScript('dev')
-    .withBuildScript('build')
-    .withEnvironment('PLANNER_ROLE', 'agent')
+    // Run mode watches the agent source; deployment builds the dist entrypoint above.
+    .withRunScript('dev:agent')
+    .withBuildScript('build:agent')
     .withEnvironment('COPILOT_OTEL_CAPTURE_CONTENT', 'true')
     .withEnvironment('COPILOT_OTEL_BSP_SCHEDULE_DELAY', '100')
     .withEnvironment('COPILOT_OTEL_FLUSH_DELAY_MS', '1500')
     .withEnvironment('OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT', 'true')
-    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-agent')
-    .withHttpEndpoint({ name: 'http', targetPort: 8088, env: 'PORT' })
-    .withHttpHealthCheck({ path: '/readiness' })
-    .withUrlForEndpoint('http', async (url) => {
-        url.displayText = 'Meeting readiness hosted agent';
-    })
+    // Injects CHAT_* flattened model metadata used by the Copilot SDK provider.
     .withReference(chat)
     .asHostedAgent(foundryProject, {
         description: 'Meeting readiness hosted-agent runtime. Uses the Copilot SDK and emits broker-reviewed readiness suggestions and CalendarPatch proposals.',
@@ -163,18 +160,26 @@ const hostedAgent = builder
         },
         protocols: [{ protocol: 'invocations', version: '1.0.0' }],
     })
+    .withHttpEndpoint({ name: 'http', env: 'PORT' })
+    .withHttpHealthCheck({ path: '/readiness' })
+    .withUrlForEndpoint('http', async (url) => {
+        url.displayText = 'Meeting readiness hosted agent';
+    })
     .withOtlpExporter({ protocol: OtlpProtocol.HttpProtobuf });
 
+// planner is the background worker. It polls the broker API for queued intents
+// and readiness jobs, then calls planner-agent only when a readiness job needs
+// model-authored suggestions.
 await builder
     .addNodeApp('planner', './services/planner', 'dist/worker.js')
     .withNpm({ install: false })
-    .withRunScript('dev')
-    .withBuildScript('build')
+    // Run mode watches the worker source; deployment builds the dist entrypoint above.
+    .withRunScript('dev:worker')
+    .withBuildScript('build:worker')
     .withComputeEnvironment(aca)
     .withEnvironment('API_BASE_URL', api.getEndpoint('http'))
-    .withEnvironment('PLANNER_ROLE', 'worker')
-    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-worker')
     .waitFor(api)
+    // The worker invokes the Foundry-hosted agent through this AppHost-provided endpoint.
     .withEnvironment('PLANNER_AGENT_ENDPOINT', hostedAgent.getEndpoint('http'))
     .withReference(hostedAgent);
 
