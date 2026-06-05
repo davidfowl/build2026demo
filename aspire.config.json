@@ -11,6 +11,7 @@
       "applicationUrl": "https://localhost:17075;http://localhost:15076",
       "environmentVariables": {
         "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21236",
+        "ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL": "https://localhost:21237",
         "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22251"
       }
     }
@@ -20,6 +21,7 @@
     "Aspire.Hosting.Browsers": "13.4.0-preview.1.26281.18",
     "Aspire.Hosting.Azure.AppContainers": "13.4.0",
     "Aspire.Hosting.Foundry": "13.4.0-preview.1.26281.18",
-    "Aspire.Hosting.PostgreSQL": "13.4.0"
+    "Aspire.Hosting.PostgreSQL": "13.4.0",
+    "Aspire.Hosting.Python": "13.4.1"
   }
 }

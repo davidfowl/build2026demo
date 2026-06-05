@@ -17,6 +17,7 @@ import {
   type PlanningIntent,
   type ReadinessStep,
   type ReadinessSuggestion,
+  type WeatherReport,
   appStateSchema,
   createSeedState,
   demoUserId,
@@ -228,7 +229,6 @@ export class CalendarStore {
         intentId: proposalId,
         createdAt: new Date().toISOString(),
         createdBy: 'user',
-        plannerMode: 'local',
         patches: [patch],
       };
 
@@ -280,7 +280,6 @@ export class CalendarStore {
         intentId: proposalId,
         createdAt: new Date().toISOString(),
         createdBy: 'user',
-        plannerMode: 'local',
         patches: [patch],
       };
 
@@ -488,7 +487,6 @@ export class CalendarStore {
         intentId: job.id,
         createdAt: new Date().toISOString(),
         createdBy: 'readiness-agent',
-        plannerMode: 'local',
         patches: [patch],
       };
 
@@ -678,7 +676,6 @@ export class CalendarStore {
         intentId: intent.id,
         createdAt: new Date().toISOString(),
         createdBy: 'demo-conflict-agent',
-        plannerMode: 'local',
         patches: [patch],
       };
       state.proposals.unshift(proposal);
@@ -694,11 +691,7 @@ export class CalendarStore {
     const latestJob = state.readinessJobs.find((job) => job.sessionId === session.sessionId) ?? state.readinessJobs[0] ?? null;
     const hosted = state.proposals.find((proposal) => proposal.hostedAgentSession)?.hostedAgentSession;
     return {
-      runtime: process.env.PLANNER_MODE === 'foundry-hosted'
-        ? 'foundry-hosted'
-        : process.env.PLANNER_MODE === 'copilot-sdk'
-          ? 'copilot-sdk'
-          : 'local',
+      runtime: 'foundry-hosted',
       browserSession: session,
       latestReadinessJob: latestJob,
       hostedAgentSession: hosted ?? null,
@@ -752,7 +745,7 @@ export class CalendarStore {
     };
   }
 
-  async getWeatherForMeeting(meetingId: string): Promise<Record<string, unknown>> {
+  async getWeatherForMeeting(meetingId: string): Promise<WeatherReport> {
     const meeting = await this.getMeeting(meetingId);
     return {
       meetingId,

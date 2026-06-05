@@ -16,22 +16,22 @@ Each chapter should reveal exactly one new layer.
 | Readiness job | "The agent will prepare me." | The agent runs app-provided tools: meeting details, 7-day calendar, weather, travel, agenda/materials. |
 | Broker policy | "So who is allowed to write?" | Calendar-changing suggestions become structured `CalendarPatch[]` proposals that the broker validates. |
 | Durable state | "Where does this coordination live?" | Aspire-managed PostgreSQL stores state, readiness jobs, proposals, decisions, and audit history. |
-| Aspire graph | "This is already a distributed system." | `web`, `api`, `planner`, commands, logs, health, and relationships in one AppHost. |
-| Resource commands | "How do I run and debug this reliably?" | Reset, trigger readiness, replay, simulate conflict, inspect session. |
-| Foundry hosted agents | "Where should model-backed agent execution live?" | Stable services stay in ACA; stateful readiness sessions move to Foundry hosted agents. |
-| Deployment | "Does this model survive production?" | Aspire publishes and deploys the same app model. |
+| Aspire graph | "This is already a distributed system." | `web`, `api`, `weather`, `planner`, commands, logs, health, and relationships in one AppHost. |
+| Resource commands | "How do I run and debug this reliably?" | Set or clear the demo calendar from the dashboard. |
+| Cloud runtime | "Where should model-backed agent execution live?" | The planner-agent is always modeled as a Foundry hosted-agent resource. |
+| Deployment | "Does this model survive production?" | The same AppHost deploys the cloud shape. |
 
 ## 45-minute arc
 
 | Time | Chapter | What is visible | Reveal |
 | --- | --- | --- | --- |
 | 0-5 min | Hook | One calendar screen. | "Agentic apps become distributed systems fast." |
-| 5-10 min | Plain app | Three manual processes or terminals. | The app works, but startup, config, logs, and operations are ad hoc. |
-| 10-16 min | First Aspire reveal | Dashboard resource graph. | Aspire turns the app into a code-first executable model. |
+| 5-10 min | App interaction | Browser only. | Booking a meeting creates a broker-authorized write and a readiness job. |
+| 10-16 min | First Aspire reveal | Dashboard resource graph. | Aspire turns the whole app into a code-first executable model. |
 | 16-24 min | Agentic interaction | Book a meeting and watch readiness start. | The agent runs multiple tools and returns practical suggestions. |
 | 24-31 min | Safety and durability | Suggested prep/travel blocks, rejected patches, Postgres/pgweb. | The broker owns authorization, and Postgres records the durable coordination trail. |
 | 31-36 min | Operability | Dashboard logs/traces and HTTP commands. | Aspire gives repeatable demo/debug operations for humans and agents. |
-| 36-42 min | Hosted agents and cloud | Foundry model path and ACA deployment preview. | Use the right runtime for each part of the distributed app. |
+| 36-42 min | Cloud shape | Foundry model path and ACA deployment preview. | Use the right runtime for each part of the distributed app. |
 | 42-45 min | Close | AppHost code. | Aspire is the app control plane in code. |
 
 ## Presenter runbook
@@ -58,7 +58,7 @@ Now explain that an agent/planner is watching the readiness queue. It does not r
 readiness job -> meeting/calendar/weather/travel/materials tools -> suggestions
 ```
 
-Use the local deterministic planner for reliability, but describe it as the same contract the model-backed planner uses later. Be explicit: the local path proves the architecture; the Foundry chapter is where model-backed hosted execution belongs.
+Use the Copilot SDK planner-agent path for the story, but keep emphasizing the same contract: the planner receives scoped context and returns suggestions, while the broker remains the only calendar write authority.
 
 ### 3. Reveal the broker as the safety boundary
 
@@ -88,11 +88,13 @@ Open the Aspire dashboard after the audience has seen the user interaction and t
 | --- | --- |
 | `web` | 7-day calendar UI and meeting-readiness cards. |
 | `api` | Calendar broker, fake calendar/readiness provider, policy, audit trail, SSE. |
+| `weather` | Python/FastAPI sidecar for meeting-day forecast advice. |
 | `postgres` / `calendar` | Durable app state for calendar events, readiness jobs, proposals, decisions, and audit history. |
 | `pgweb` | Inspectable Postgres UI from the dashboard. |
 | `planner` | Background planner/agent worker that runs readiness tools and proposes patches. |
 | `aca` | Deployment environment for stable app services. |
-| Foundry resources | Optional hosted-agent runtime for model-backed planning sessions. |
+| `planner-agent` | Copilot SDK-backed hosted-agent resource modeled with `asHostedAgent(...)`. |
+| Foundry resources | Project and chat deployment backing the hosted-agent runtime. |
 
 Say:
 
@@ -102,25 +104,12 @@ Say:
 
 Frame these commands strictly as local inner-loop helpers. They are not the product surface and they are not the production agent runtime. They make development and rehearsal fast because the app model carries repeatable operations for seeding, generating, clearing, conflict simulation, and inspection.
 
-First use one command from the Aspire dashboard, then run the same kind of operation from the Aspire CLI to show that inner-loop operations are part of the executable app model rather than one-off scripts.
+Use one command from the Aspire dashboard to show that inner-loop operations are part of the executable app model rather than one-off scripts.
 
-```bash
-aspire describe api
-aspire resource api inspect-agent-session --apphost ./apphost.mts
-aspire resource api generate-build-week-calendar --apphost ./apphost.mts
-aspire resource api clear-calendar-events --apphost ./apphost.mts
-aspire resource api trigger-meeting-readiness --apphost ./apphost.mts
-aspire resource api simulate-calendar-conflict --apphost ./apphost.mts
-```
-
-| Command | CLI name | Inner-loop reason |
-| --- | --- | --- |
-| Seed demo calendar | `seed-demo-calendar` | Return Postgres to the seeded 7-day scenario. |
-| Generate Build week calendar | `generate-build-week-calendar` | Replace the calendar with a believable randomized Build-themed week. |
-| Clear calendar events | `clear-calendar-events` | Start from an empty calendar while preserving an audit entry. |
-| Trigger meeting readiness | `trigger-meeting-readiness` | Exercise the long-running readiness agent without manual UI setup. |
-| Simulate stale etag conflict | `simulate-calendar-conflict` | Optional safety-boundary proof on demand. |
-| Inspect agent session | `inspect-agent-session` | Inspect local/hosted planner configuration while developing. |
+| Command | Inner-loop reason |
+| --- | --- |
+| Set demo calendar | Return Postgres to the seeded 7-day scenario or generate a believable randomized Build-themed week. |
+| Clear calendar | Start from an empty calendar while preserving an audit entry. |
 
 The point is inner-loop DevEx: commands, logs, resource state, relationships, and operational affordances are discoverable from the app model and callable from tooling while you build and debug.
 
@@ -136,11 +125,7 @@ Do not position Azure Container Apps as the place to run arbitrary stateful agen
 | Idle behavior | You build lifecycle management. | Agent runtime owns the session lifecycle. |
 | App authority | Easy to accidentally over-grant. | Broker still owns calendar writes. |
 
-Then show the opt-in hosted-agent shape:
-
-```bash
-ENABLE_FOUNDRY_HOSTED_AGENT=true aspire start --isolated
-```
+Then show that the hosted-agent compute resource is present in the dev graph and becomes the Foundry hosted-agent runtime at publish time.
 
 The key line:
 
@@ -151,15 +136,14 @@ The key line:
 Preview deployment without turning the final minutes into cloud plumbing:
 
 ```bash
-aspire publish --list-steps
-aspire deploy --list-steps
+npm run deploy
 ```
 
 Make the split clear:
 
 | Part | Deployment posture |
 | --- | --- |
-| Web/API/stable worker | Azure Container Apps through Aspire. |
+| Web/API/weather/stable worker | Azure Container Apps through Aspire. |
 | Model-backed planning sessions | Foundry hosted agents. |
 | Calendar writes | Still broker-authorized. |
 | App topology | Still defined in the AppHost. |
@@ -173,14 +157,13 @@ Make the split clear:
 5. Review suggestions for prep time, weather/attire, travel/setup, and agenda/materials.
 6. Accept the prep-time suggestion and show the broker-applied prep block.
 7. Hover a meeting, click the trash button, and approve the delete modal to show destructive changes still run through broker validation.
-8. Simulate stale etag conflict and show rejection.
-9. Open Aspire dashboard and reveal `web`, `api`, `planner`, and Postgres.
-10. Open pgweb to show durable readiness state and audit history.
-11. Search logs/traces for the readiness job or proposal id.
-12. Run one inner-loop command from the dashboard, then the same class of command from the CLI with `aspire resource api trigger-meeting-readiness`.
-13. Show `apphost.mts` as the code-first model that defines the app resources and local development command surface.
-14. Preview Foundry hosted-agent mode.
-15. Preview ACA deployment steps.
+8. Open Aspire dashboard and reveal `web`, `api`, `weather`, `planner`, and Postgres.
+9. Open pgweb to show durable readiness state and audit history.
+10. Search logs/traces for the readiness job or proposal id.
+11. Run one inner-loop command from the dashboard.
+12. Show `apphost.mts` as the code-first model that defines the app resources and local development command surface.
+13. Preview the Foundry/Copilot SDK hosted-agent resources.
+14. Preview `npm run deploy`.
 
 ## What not to reveal too early
 

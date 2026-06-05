@@ -249,10 +249,8 @@ export function App() {
     events.onerror = () => {
       events.close();
     };
-    const interval = window.setInterval(() => void loadState(), 5000);
     return () => {
       events.close();
-      window.clearInterval(interval);
     };
   }, [loadSession, loadState]);
 
@@ -427,6 +425,19 @@ export function App() {
     }
   }
 
+  async function resetSession() {
+    setResettingSession(true);
+    try {
+      setBrowserSession(await api('/api/session/reset', { method: 'POST' }) as BrowserSession);
+      showToast('Started a new browser session cookie.');
+      await loadState();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not reset browser session.');
+    } finally {
+      setResettingSession(false);
+    }
+  }
+
   async function bookMeeting() {
     const title = newMeeting.title.trim();
     if (!title) {
@@ -436,18 +447,6 @@ export function App() {
         titleInput.reportValidity();
       }
 
-      async function resetSession() {
-        setResettingSession(true);
-        try {
-          setBrowserSession(await api('/api/session/reset', { method: 'POST' }) as BrowserSession);
-          showToast('Started a new browser session cookie.');
-          await loadState();
-        } catch (error) {
-          showToast(error instanceof Error ? error.message : 'Could not reset browser session.');
-        } finally {
-          setResettingSession(false);
-        }
-      }
       showToast('Add a meeting title before booking.');
       return;
     }
@@ -1861,7 +1860,7 @@ async function api(path: string, init: RequestInit = {}): Promise<unknown> {
 
 function latestAgentSession(state: AppState): unknown {
   return state.proposals.find((proposal) => proposal.hostedAgentSession)?.hostedAgentSession ?? {
-    runtime: 'local',
+    runtime: 'foundry-hosted',
     queuedReadinessJobs: state.readinessJobs.filter((job) => job.status === 'queued').length,
     latestReadinessJob: state.readinessJobs[0] ?? null,
     note: 'The API stamps jobs with the cookie-backed browser session; Foundry agent_session_id stays server-side.',
