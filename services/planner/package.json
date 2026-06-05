@@ -5,8 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/worker.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "dev:agent": "tsx watch src/agent.ts",
     "start": "node dist/worker.js",
-    "build": "esbuild src/worker.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/worker.js --external:@azure/identity --external:@github/copilot-sdk --external:@opentelemetry/* --external:zod",
+    "start:agent": "node dist/agent.js",
+    "build": "npm run build:worker && npm run build:agent",
+    "build:worker": "esbuild src/worker.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/worker.js --external:@azure/identity --external:@github/copilot-sdk --external:@opentelemetry/* --external:zod",
+    "build:agent": "esbuild src/agent.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/agent.js --external:@azure/identity --external:@github/copilot-sdk --external:@opentelemetry/* --external:zod",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
