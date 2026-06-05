@@ -11,11 +11,13 @@ import {
   readinessProgressRequestSchema,
   readinessResultRequestSchema,
   submitProposalRequestSchema,
+  weatherReportSchema,
 } from './shared';
 import { getOrCreateBrowserSession, resetBrowserSession } from './sessions';
 import { BrokerError, CalendarStore } from './store';
 
 const port = Number(process.env.PORT ?? 4310);
+const weatherBaseUrl = process.env.WEATHER_BASE_URL;
 const store = new CalendarStore();
 const app = express();
 let ready = false;
@@ -205,7 +207,7 @@ app.get('/api/agent/weather', async (request, response) => {
     response.status(400).json({ error: 'meetingId is required.' });
     return;
   }
-  response.json(await store.getWeatherForMeeting(meetingId));
+  response.json(await getWeatherForMeeting(meetingId));
 });
 
 app.get('/api/agent/travel', async (request, response) => {
@@ -284,6 +286,45 @@ app.use(((error: unknown, _request: Request, response: Response, _next) => {
   console.error('[broker] unhandled error', error);
   response.status(500).json({ error: 'Unexpected broker error.' });
 }) satisfies ErrorRequestHandler);
+
+async function getWeatherForMeeting(meetingId: string) {
+  if (!weatherBaseUrl) {
+    return store.getWeatherForMeeting(meetingId);
+  }
+
+  const meeting = await store.getMeeting(meetingId);
+  const weatherResponse = await fetch(new URL('/forecast', weatherBaseUrl), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      meetingId,
+      location: meeting.location ?? 'Seattle',
+      forecastAt: meeting.start,
+    }),
+  });
+
+  if (!weatherResponse.ok) {
+    const detail = await weatherResponse.text();
+    throw new BrokerError(
+      502,
+      `Weather service returned ${weatherResponse.status} ${weatherResponse.statusText}${detail ? `: ${detail.slice(0, 200)}` : '.'}`,
+    );
+  }
+
+  let payload: unknown;
+  try {
+    payload = await weatherResponse.json();
+  } catch {
+    throw new BrokerError(502, 'Weather service returned a non-JSON forecast payload.');
+  }
+
+  const parsed = weatherReportSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new BrokerError(502, 'Weather service returned an invalid forecast payload.');
+  }
+
+  return parsed.data;
+}
 
 try {
   console.log(`[broker] Starting calendar broker on port ${port}.`);

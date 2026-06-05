@@ -3,3 +3,5 @@ dist/
 .aspire/
 .demo-state/
 .playwright-cli/
+__pycache__/
+.venv/

@@ -67,7 +67,6 @@ export const proposalSchema = z.object({
   intentId: z.string(),
   createdAt: z.string(),
   createdBy: z.string(),
-  plannerMode: z.enum(['local', 'foundry-hosted', 'copilot-sdk']),
   patches: z.array(calendarPatchSchema),
   hostedAgentSession: z
     .object({
@@ -230,6 +229,17 @@ export const readinessFailureRequestSchema = z.object({
 });
 export type ReadinessFailureRequest = z.infer<typeof readinessFailureRequestSchema>;
 
+export const weatherReportSchema = z.object({
+  meetingId: z.string().optional(),
+  location: z.string(),
+  forecastAt: z.string(),
+  condition: z.string(),
+  temperatureF: z.number(),
+  precipitationChance: z.number(),
+  recommendation: z.string(),
+});
+export type WeatherReport = z.infer<typeof weatherReportSchema>;
+
 export const hostedAgentContextSchema = z.object({
   job: meetingReadinessJobSchema,
   meeting: calendarEventSchema,
@@ -238,14 +248,7 @@ export const hostedAgentContextSchema = z.object({
     end: z.string(),
     events: z.array(calendarEventSchema),
   }),
-  weather: z.object({
-    location: z.string(),
-    forecastAt: z.string(),
-    condition: z.string(),
-    temperatureF: z.number(),
-    precipitationChance: z.number(),
-    recommendation: z.string(),
-  }),
+  weather: weatherReportSchema,
   travel: z.object({
     from: z.string(),
     to: z.string(),

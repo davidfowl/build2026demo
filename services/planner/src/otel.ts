@@ -5,6 +5,17 @@ import { NodeSDK } from '@opentelemetry/sdk-node';
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 
 const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+const ignoredBackgroundPaths = [
+  '/api/agent/',
+  '/api/planner/next-intent',
+  '/api/planner/next-readiness-job',
+  '/api/planner/readiness-jobs/',
+  '/api/state',
+];
+
+function isIgnoredBackgroundPath(path: string | undefined): boolean {
+  return Boolean(path && ignoredBackgroundPaths.some((ignoredPath) => path.startsWith(ignoredPath)));
+}
 
 if (otlpEndpoint) {
   const sdk = new NodeSDK({
@@ -13,7 +24,16 @@ if (otlpEndpoint) {
     metricReader: new PeriodicExportingMetricReader({
       exporter: new OTLPMetricExporter(),
     }),
-    instrumentations: [getNodeAutoInstrumentations()],
+    instrumentations: [
+      getNodeAutoInstrumentations({
+        '@opentelemetry/instrumentation-http': {
+          ignoreOutgoingRequestHook: (request) => isIgnoredBackgroundPath(String(request.path ?? '')),
+        },
+        '@opentelemetry/instrumentation-undici': {
+          ignoreRequestHook: (request) => isIgnoredBackgroundPath(request.path),
+        },
+      }),
+    ],
   });
 
   try {

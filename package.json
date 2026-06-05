@@ -12,20 +12,12 @@
     "node": "^20.19.0 || ^22.13.0 || >=24"
   },
   "scripts": {
-    "aspire:lint": "eslint apphost.mts",
-    "aspire:start": "aspire run",
-    "aspire:build": "tsc -p tsconfig.apphost.json",
-    "aspire:dev": "tsc --watch -p tsconfig.apphost.json",
-    "plain:api": "npm run dev --workspace @build2026/api",
-    "plain:planner": "npm run dev --workspace @build2026/planner",
-    "plain:web": "npm run dev --workspace @build2026/web",
-    "lint": "npm run aspire:lint && npm run typecheck --workspaces --if-present",
-    "predev": "npm run aspire:lint",
-    "dev": "npm run aspire:start",
-    "prebuild": "npm run aspire:lint",
-    "build": "npm run aspire:build && npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "watch": "npm run aspire:dev"
+    "dev": "aspire start --isolated --apphost ./apphost.mts",
+    "stop": "aspire stop --apphost ./apphost.mts",
+    "deploy": "aspire deploy --apphost ./apphost.mts",
+    "lint": "eslint apphost.mts && npm run typecheck",
+    "build": "tsc -p tsconfig.apphost.json && npm run build --workspaces --if-present",
+    "typecheck": "tsc -p tsconfig.apphost.json --noEmit && npm run typecheck --workspaces --if-present"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.1.1",

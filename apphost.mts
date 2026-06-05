@@ -2,6 +2,7 @@ import {
     FoundryModels,
     HttpCommandResultMode,
     InputType,
+    OtlpProtocol,
     createBuilder,
     type ExecuteCommandContext,
     type ExecuteCommandResult,
@@ -10,7 +11,6 @@ import {
 const builder = await createBuilder();
 const executionContext = await builder.executionContext();
 const isRunMode = await executionContext.isRunMode();
-const isPublishMode = await executionContext.isPublishMode();
 
 const aca = await builder.addAzureContainerAppEnvironment('aca');
 const calendarDatabaseName = 'calendar';
@@ -24,51 +24,41 @@ postgres = postgres
     .withComputeEnvironment(aca)
     .withPgWeb({ configureContainer: async (pgweb) => { await pgweb.withComputeEnvironment(aca); } });
 const calendarDb = postgres.addDatabase(calendarDatabaseName);
-const useCopilotSdkInference = process.env.ENABLE_COPILOT_SDK_INFERENCE === 'true';
-const useFoundryHostedAgent = !useCopilotSdkInference && (isPublishMode || process.env.ENABLE_FOUNDRY_HOSTED_AGENT === 'true');
-const useFoundry = useFoundryHostedAgent || useCopilotSdkInference;
-const plannerModeValue = useFoundryHostedAgent ? 'foundry-hosted' : useCopilotSdkInference ? 'copilot-sdk' : 'local';
-const plannerMode = builder.addParameter('plannerMode', { value: plannerModeValue, publishValueAsDefault: true });
-const foundry = useFoundry ? await builder.addFoundry('foundry') : undefined;
-const foundryProject = foundry ? await foundry.addProject('calendarplanning') : undefined;
-const chat = foundry
-    ? useCopilotSdkInference
-        ? await foundry.addDeployment('chat', FoundryModels.OpenAI.Gpt5Mini)
-        : foundryProject
-            ? await foundryProject.addModelDeployment('chat', FoundryModels.OpenAI.Gpt5Mini)
-            : undefined
-    : undefined;
+const foundry = await builder.addFoundry('foundry');
+const foundryProject = await foundry.addProject('calendarplanning');
+const chat = await foundryProject.addModelDeployment('chat', FoundryModels.OpenAI.Gpt5Mini);
 
-if (useCopilotSdkInference && chat) {
-    await chat.skuCapacity.set(10);
-}
+const weather = await builder
+    .addPythonApp('weather', './services/weather-python', 'main.py')
+    .withPip({ install: true, installArgs: ['-r', 'requirements.txt'] })
+    .withComputeEnvironment(aca)
+    .withEnvironment('OTEL_SERVICE_NAME', 'weather-readiness-python')
+    .withHttpEndpoint({ name: 'http', env: 'PORT' })
+    .withUrlForEndpoint('http', async (url) => {
+        url.displayText = 'Python weather sidecar';
+    });
 
-if (useFoundryHostedAgent && foundryProject && chat) {
-    await foundryProject.addPromptAgent('calendar-policy-planner', chat, {
-        instructions: `
+await foundryProject.addPromptAgent('calendar-policy-planner', chat, {
+    instructions: `
 You are the meeting readiness agent for an Aspire Build 2026 demo.
 Use app-provided tools to analyze prep time, weather/attire, travel buffer, and agenda/materials.
 Return readiness suggestions. Include structured CalendarPatch proposals only for user-visible calendar suggestions.
 Never call calendar write APIs directly.
 The calendar broker validates ownership, permissions, stale etags, and confirmation policy.
 `.trim(),
-    });
-}
+});
 
-let apiResource = builder
+const api = await builder
     .addNodeApp('api', './services/api', 'dist/server.js')
     .withRunScript('dev')
     .withBuildScript('build')
     .withComputeEnvironment(aca)
     .withEnvironment('CALENDAR_STORE', 'postgres')
     .withEnvironment('OTEL_SERVICE_NAME', 'calendar-broker-api')
-    .withReference(calendarDb);
-
-if (isRunMode) {
-    apiResource = apiResource.waitFor(calendarDb);
-}
-
-const api = await apiResource
+    .withEnvironment('WEATHER_BASE_URL', weather.getEndpoint('http'))
+    .withReference(calendarDb)
+    .waitFor(calendarDb)
+    .waitFor(weather)
     .withHttpEndpoint({ name: 'http', env: 'PORT' })
     .withHttpHealthCheck({ path: '/readiness' })
     .withUrlForEndpoint('http', async (url) => {
@@ -145,70 +135,55 @@ await api.withHttpCommand('/api/demo/clear-events', 'Clear calendar', {
     resultMode: HttpCommandResultMode.Json,
 });
 
-let hostedAgent;
-if (useFoundryHostedAgent && foundryProject && chat) {
-    hostedAgent = builder
-        .addNodeApp('planner-agent', './services/planner', 'dist/worker.js')
-        .withRunScript('dev')
-        .withBuildScript('build')
-        .withEnvironment('PLANNER_ROLE', 'agent')
-        .withEnvironment('PLANNER_MODE', 'foundry-hosted')
-        .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-agent')
-        .withHttpEndpoint({ name: 'http', targetPort: 8088, env: 'PORT' })
-        .withHttpHealthCheck({ path: '/readiness' })
-        .withReference(chat)
-        .asHostedAgent(foundryProject, {
-            description: 'Meeting readiness hosted-agent runtime. Emits broker-reviewed readiness suggestions and CalendarPatch proposals.',
-            cpu: 0.5,
-            memory: 1,
-            metadata: {
-                demo: 'build-2026-aspire-agents',
-                authority: 'calendar-broker',
-            },
-            protocols: [{ protocol: 'invocations', version: '1.0.0' }],
-        });
-}
+const hostedAgent = builder
+    .addNodeApp('planner-agent', './services/planner', 'dist/worker.js')
+    .withNpm({ install: false })
+    .withRunScript('dev')
+    .withBuildScript('build')
+    .withEnvironment('PLANNER_ROLE', 'agent')
+    .withEnvironment('COPILOT_OTEL_CAPTURE_CONTENT', 'true')
+    .withEnvironment('COPILOT_OTEL_BSP_SCHEDULE_DELAY', '100')
+    .withEnvironment('COPILOT_OTEL_FLUSH_DELAY_MS', '1500')
+    .withEnvironment('OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT', 'true')
+    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-agent')
+    .withHttpEndpoint({ name: 'http', targetPort: 8088, env: 'PORT' })
+    .withHttpHealthCheck({ path: '/readiness' })
+    .withUrlForEndpoint('http', async (url) => {
+        url.displayText = 'Meeting readiness hosted agent';
+    })
+    .withReference(chat)
+    .asHostedAgent(foundryProject, {
+        description: 'Meeting readiness hosted-agent runtime. Uses the Copilot SDK and emits broker-reviewed readiness suggestions and CalendarPatch proposals.',
+        cpu: 0.5,
+        memory: 1,
+        metadata: {
+            demo: 'build-2026-aspire-agents',
+            authority: 'calendar-broker',
+            runtime: 'copilot-sdk',
+        },
+        protocols: [{ protocol: 'invocations', version: '1.0.0' }],
+    })
+    .withOtlpExporter({ protocol: OtlpProtocol.HttpProtobuf });
 
-let planner = builder
+await builder
     .addNodeApp('planner', './services/planner', 'dist/worker.js')
+    .withNpm({ install: false })
     .withRunScript('dev')
     .withBuildScript('build')
     .withComputeEnvironment(aca)
     .withEnvironment('API_BASE_URL', api.getEndpoint('http'))
     .withEnvironment('PLANNER_ROLE', 'worker')
-    .withEnvironment('PLANNER_MODE', plannerMode)
-    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-worker');
+    .withEnvironment('OTEL_SERVICE_NAME', 'calendar-planner-worker')
+    .waitFor(api)
+    .withEnvironment('PLANNER_AGENT_ENDPOINT', hostedAgent.getEndpoint('http'))
+    .withReference(hostedAgent);
 
-if (isRunMode) {
-    planner = planner.waitFor(api);
-}
-
-if (foundryProject && chat && hostedAgent) {
-    planner = planner
-        .withEnvironment('PLANNER_AGENT_ENDPOINT', hostedAgent.getEndpoint('http'))
-        .withReference(hostedAgent)
-        .withReference(foundryProject)
-        .withReference(chat);
-} else if (foundryProject && chat) {
-    planner = planner
-        .withEnvironment('FOUNDRY_PROJECT_NAME', 'calendarplanning')
-        .withEnvironment('COPILOT_MODEL_ID', 'gpt-5-mini')
-        .withReference(chat);
-}
-
-await planner;
-
-let web = builder
+await builder
     .addViteApp('web', './apps/web')
     .withComputeEnvironment(aca)
     .withEnvironment('API_BASE_URL', api.getEndpoint('http'))
-    .withReference(api);
-
-if (isRunMode) {
-    web = web.waitFor(api);
-}
-
-await web
+    .withReference(api)
+    .waitFor(api)
     .withExternalHttpEndpoints()
     .withUrlForEndpoint('http', async (url) => {
         url.displayText = 'Calendar assistant';
