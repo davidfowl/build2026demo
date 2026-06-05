@@ -2,6 +2,7 @@ import {
     FoundryModels,
     HttpCommandResultMode,
     InputType,
+    OtlpProtocol,
     createBuilder,
     type ExecuteCommandContext,
     type ExecuteCommandResult,
@@ -10,7 +11,6 @@ import {
 const builder = await createBuilder();
 const executionContext = await builder.executionContext();
 const isRunMode = await executionContext.isRunMode();
-const dashboardOtlpHttpEndpoint = process.env.ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL ?? '';
 
 const aca = await builder.addAzureContainerAppEnvironment('aca');
 const calendarDatabaseName = 'calendar';
@@ -141,7 +141,6 @@ const hostedAgent = builder
     .withRunScript('dev')
     .withBuildScript('build')
     .withEnvironment('PLANNER_ROLE', 'agent')
-    .withEnvironment('COPILOT_OTEL_EXPORTER_OTLP_ENDPOINT', dashboardOtlpHttpEndpoint)
     .withEnvironment('COPILOT_OTEL_CAPTURE_CONTENT', 'true')
     .withEnvironment('COPILOT_OTEL_BSP_SCHEDULE_DELAY', '100')
     .withEnvironment('COPILOT_OTEL_FLUSH_DELAY_MS', '1500')
@@ -163,7 +162,8 @@ const hostedAgent = builder
             runtime: 'copilot-sdk',
         },
         protocols: [{ protocol: 'invocations', version: '1.0.0' }],
-    });
+    })
+    .withOtlpExporter({ protocol: OtlpProtocol.HttpProtobuf });
 
 await builder
     .addNodeApp('planner', './services/planner', 'dist/worker.js')
