@@ -1,6 +1,9 @@
-// Entrypoint for the planner worker resource. apphost.mts runs this as planner,
-// which polls the broker API, creates CalendarPatch proposals, invokes the
-// hosted agent for readiness jobs, and writes validated results back to the API.
+// Module: planner worker process entrypoint.
+// Exports: nothing; export {} only marks the file as an ES module.
+// Does: initializes telemetry/configuration, then runs the planning and
+// readiness polling loops in parallel.
+// Why: apphost.mts starts this file as the planner resource that turns broker
+// queue items into CalendarPatch proposals and readiness results.
 
 export {};
 

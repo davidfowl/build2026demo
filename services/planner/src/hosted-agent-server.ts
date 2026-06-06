@@ -1,3 +1,11 @@
+// Module: HTTP server for the Foundry hosted-agent invocation protocol.
+// Exports: startHostedAgentServer.
+// Does: exposes health probes and POST /invocations, normalizes incoming
+// invocation envelopes, extracts trace context, calls the Copilot-backed
+// readiness planner, and returns protocol-shaped assistant output.
+// Why: bridges Foundry's hosted-agent runtime to this demo's typed readiness
+// suggestion generator while preserving session affinity.
+
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
@@ -11,8 +19,6 @@ import { generateReadinessSuggestions } from './copilot-foundry-client';
 import { requiredEnv, workerId } from './config';
 import { suggestionTitles } from './model-output';
 
-// Foundry calls this HTTP surface using the invocations protocol declared in
-// apphost.mts. PORT is supplied by withHttpEndpoint(..., env: 'PORT').
 const incomingHeaderGetter: TextMapGetter<IncomingHttpHeaders> = {
   keys: (carrier) => Object.keys(carrier),
   get: (carrier, key) => {

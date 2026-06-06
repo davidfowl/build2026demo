@@ -1,3 +1,12 @@
+// Module: shared planner/broker domain contract.
+// Exports: Zod schemas, inferred TypeScript types, demo constants, seed-state
+// helpers, id/etag utilities, date helpers, hosted-agent invocation envelope
+// normalization, and patch-policy evaluation.
+// Does: defines the JSON shapes that the planner worker, hosted-agent server,
+// Copilot adapter, and broker API exchange.
+// Why: keeps runtime validation and TypeScript types aligned across the two
+// server-side packages that communicate over HTTP.
+
 import { z } from 'zod';
 
 export const demoUserId = 'user-alex';

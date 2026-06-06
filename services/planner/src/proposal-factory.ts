@@ -1,3 +1,11 @@
+// Module: deterministic CalendarPatch proposal builder.
+// Exports: createProposal.
+// Does: translates a claimed drag/command intent plus current calendar state
+// into one or more proposed patches and adds hosted-agent session preview
+// metadata for the UI.
+// Why: keeps simple planning logic deterministic; the broker remains responsible
+// for applying, rejecting, or requiring confirmation for every patch.
+
 import {
   type AppState,
   type CalendarEvent,
@@ -10,8 +18,6 @@ import {
 } from './shared';
 import { resolveHostedAgentEndpoint } from './config';
 
-// Builds CalendarPatch proposals only. The broker remains the calendar write
-// authority and decides whether these patches can be applied.
 export function createProposal(intent: PlanningIntent, event: CalendarEvent, state: AppState): PatchProposal {
   const window = moveWindow(event, intent.desiredStart, intent.desiredEnd);
   const patches: CalendarPatch[] = [

@@ -1,3 +1,13 @@
+// Module: typed HTTP client for the broker API.
+// Exports: configuredApiBaseUrl plus worker-facing functions for state reads,
+// planning claims, proposal submission, readiness job lifecycle updates, and
+// hosted-agent context reads.
+// Does: builds broker-relative URLs from API_BASE_URL, validates request bodies,
+// parses responses through shared Zod schemas, and turns 204 queue responses into
+// undefined.
+// Why: keeps worker loops small and ensures every API boundary is runtime
+// validated before planner code trusts broker data.
+
 import { z } from 'zod';
 import {
   appStateSchema,
@@ -27,8 +37,6 @@ import {
 } from './shared';
 import { requiredEnv, withoutTrailingSlash } from './config';
 
-// apphost.mts injects API_BASE_URL from api.getEndpoint('http') for the worker.
-// All broker calls stay relative to that configured endpoint.
 const apiBaseUrl = withoutTrailingSlash(requiredEnv('API_BASE_URL'));
 
 const claimedPlanningIntentSchema = z.object({

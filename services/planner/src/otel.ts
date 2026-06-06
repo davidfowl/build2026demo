@@ -1,3 +1,10 @@
+// Module: OpenTelemetry bootstrap for planner and hosted-agent processes.
+// Exports: nothing; importing this file conditionally starts telemetry.
+// Does: configures Node auto-instrumentation, OTLP trace/metric exporters, and
+// shutdown flushing while filtering noisy broker polling calls.
+// Why: lets worker.ts and agent.ts enable observability before their long-running
+// loops or HTTP server start without duplicating telemetry setup.
+
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';

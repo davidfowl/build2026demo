@@ -1,3 +1,11 @@
+// Module: worker-side client for invoking the Foundry hosted agent.
+// Exports: invokeHostedAgent.
+// Does: builds the invocations URL, attaches Entra auth for deployed Foundry
+// endpoints, retries transient hosted-agent failures, preserves session affinity
+// per browser session, and parses readiness suggestions from protocol responses.
+// Why: hides hosted-agent transport details from readiness-worker so that worker
+// code can treat the hosted agent as a typed suggestion function.
+
 import { z } from 'zod';
 import {
   type HostedAgentContext,
@@ -15,15 +23,11 @@ import {
 } from './config';
 import { modelReadinessSuggestionSchema, suggestionTitles } from './model-output';
 
-// This is the worker-side client for the hosted agent. The endpoint is injected
-// by apphost.mts as PLANNER_AGENT_ENDPOINT; this module only adds the Foundry
-// invocations path, auth, retry, and session-affinity behavior.
 const hostedAgentSessions = new Map<string, string>();
 let cachedFoundryToken: { token: string; expiresOnTimestamp: number } | undefined;
 
 export async function invokeHostedAgent(context: HostedAgentContext): Promise<ReadinessSuggestion[]> {
   const endpoint = resolveHostedAgentEndpoint();
-  // Preserve Foundry session affinity for all jobs from the same browser session.
   const affinityKey = stableAgentSessionId(context.job);
   const body = JSON.stringify(hostedAgentInvocationRequestSchema.parse({ context, session_id: affinityKey }));
 
@@ -82,9 +86,7 @@ export async function invokeHostedAgent(context: HostedAgentContext): Promise<Re
 
   throw new Error('Hosted agent invocation did not complete.');
 }
-
 function buildInvocationUrl(endpoint: string, agentSessionId: string | undefined): string {
-  // Foundry exposes the hosted agent root; the invocations protocol lives under this fixed path.
   const base = withoutTrailingSlash(endpoint);
   const url = new URL(
     base.includes('/endpoint/protocols/invocations') ? base : `${base}/endpoint/protocols/invocations`,
@@ -98,7 +100,6 @@ function buildInvocationUrl(endpoint: string, agentSessionId: string | undefined
 
 async function hostedAgentAuthHeaders(invocationUrl: string): Promise<Record<string, string>> {
   const url = new URL(invocationUrl);
-  // Local AppHost runs call the local Node endpoint; deployed Foundry endpoints require Entra auth.
   if (['localhost', '127.0.0.1', '::1'].includes(url.hostname)) {
     return {};
   }

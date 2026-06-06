@@ -1,3 +1,12 @@
+// Module: model-output validation helpers for readiness suggestions.
+// Exports: modelReadinessSuggestionSchema, parseCopilotReadinessSuggestions, and
+// suggestionTitles.
+// Does: extracts JSON from Copilot responses, accepts model-friendly nullish
+// proposedPatch values, converts them into the stricter broker schema, and
+// formats suggestion titles for logs.
+// Why: keeps LLM response normalization at the model boundary so internal
+// planner and broker code can rely on strict types.
+
 import { z } from 'zod';
 import {
   type ReadinessSuggestion,
@@ -5,9 +14,6 @@ import {
   readinessSuggestionSchema,
 } from './shared';
 
-// The model is instructed to omit proposedPatch when there is no calendar edit,
-// but LLMs sometimes return null. Normalize that at the model boundary and keep
-// the internal broker schema strict.
 export const modelReadinessSuggestionSchema = readinessSuggestionSchema
   .extend({ proposedPatch: calendarPatchSchema.nullish() })
   .transform(({ proposedPatch, ...suggestion }) => proposedPatch ? { ...suggestion, proposedPatch } : suggestion);

@@ -1,3 +1,11 @@
+// Module: meeting-readiness worker loop.
+// Exports: runReadinessLoop.
+// Does: claims queued readiness jobs, gathers broker-approved meeting context,
+// records UI-visible progress, invokes the hosted agent, and posts validated
+// suggestions or failures back to the broker.
+// Why: separates long-running agent work from the API process while keeping the
+// broker in control of what context is read and when jobs are canceled.
+
 import { SpanStatusCode, trace, type Span } from '@opentelemetry/api';
 import {
   claimNextReadinessJob,
@@ -22,8 +30,6 @@ import {
 
 const tracer = trace.getTracer('build2026-planner-agent');
 
-// Handles queued meeting-readiness jobs by gathering broker-approved context
-// from the API, then sending only that scoped context to the hosted agent.
 export async function runReadinessLoop(): Promise<void> {
   for (;;) {
     try {

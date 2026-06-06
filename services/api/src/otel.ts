@@ -1,3 +1,10 @@
+// Module: OpenTelemetry bootstrap for the broker API.
+// Exports: nothing; importing this file conditionally starts telemetry.
+// Does: configures Node auto-instrumentation, OTLP trace/metric exporters, and
+// shutdown flushing while filtering noisy background polling endpoints.
+// Why: keeps observability setup as a side effect that server.ts can load before
+// Express routes and database work are initialized.
+
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';

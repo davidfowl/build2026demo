@@ -1,3 +1,11 @@
+// Module: browser-session helper for the broker API.
+// Exports: BrowserSession plus getOrCreateBrowserSession and resetBrowserSession.
+// Does: owns the HttpOnly calendar_user_id cookie, derives a stable public
+// session id/display name from it, clears legacy client-readable cookies, and
+// revokes reset cookie values for this process.
+// Why: keeps browser identity and Foundry session affinity server-owned instead
+// of exposing opaque session tokens to client-side JavaScript.
+
 import { createHash, randomBytes } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { demoUserId } from './shared';
