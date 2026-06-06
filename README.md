@@ -26,18 +26,18 @@ Calendar-changing output always flows through structured `CalendarPatch[]` propo
 
 ```mermaid
 flowchart LR
-    user[User] --> web[web<br/>React/Vite calendar UI]
-    web -->|/api requests + SSE| api[api<br/>calendar broker]
-    api -->|read/write state| db[(postgres/calendar)]
-    api -->|forecast requests| weather[weather<br/>Python/FastAPI]
-    planner[planner<br/>background worker] -->|poll intents + jobs| api
-    planner -->|submit CalendarPatch proposals<br/>and readiness results| api
-    planner -->|invoke scoped readiness context| agent[planner-agent<br/>hosted-agent runtime]
-    agent -->|Copilot SDK provider call| foundry[foundry/calendarplanning/chat]
-    api -->|broker decisions + state stream| web
-    dashboard[Aspire dashboard] -->|commands, logs, resources| api
-    dashboard --> pgweb[pgweb]
-    pgweb --> db
+    user[User] --> web[web<br/>React UI]
+    web -->|API + live state| api[api<br/>broker]
+    api --> db[(Postgres<br/>calendar data)]
+    api --> weather[weather<br/>forecasts]
+
+    planner[planner<br/>worker] -->|poll jobs + submit results| api
+    planner -->|request readiness suggestions| agent[planner-agent]
+    agent -->|Copilot SDK| foundry[Foundry<br/>hosted model]
+
+    dashboard[Aspire dashboard<br/>commands, logs, resources] -.-> api
+    dashboard -.-> pgweb[pgweb<br/>database UI]
+    pgweb -.-> db
 ```
 
 ## Planner worker vs. planner-agent
