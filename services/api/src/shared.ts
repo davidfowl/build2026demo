@@ -1,3 +1,12 @@
+// Module: shared broker domain contract for the API service.
+// Exports: Zod schemas, inferred TypeScript types, demo constants, seed-state
+// helpers, id/etag utilities, date helpers, and patch-policy evaluation.
+// Does: defines the JSON shapes used by browser requests, planner queues,
+// calendar patches, readiness jobs, hosted-agent context, weather responses, and
+// broker decisions.
+// Why: keeps runtime validation and TypeScript types in the same place so API
+// routes, persistence, and worker-facing contracts stay consistent.
+
 import { z } from 'zod';
 
 export const demoUserId = 'user-alex';

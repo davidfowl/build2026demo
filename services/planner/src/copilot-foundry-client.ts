@@ -1,3 +1,11 @@
+// Module: Copilot SDK adapter for readiness generation inside the hosted agent.
+// Exports: generateReadinessSuggestions.
+// Does: builds the meeting-readiness prompt, creates a Copilot SDK session using
+// the Azure AI Foundry model deployment, records GenAI telemetry, parses the JSON
+// response, and returns typed readiness suggestions.
+// Why: isolates model-provider setup and prompt/telemetry handling from the HTTP
+// invocation server.
+
 import { SpanStatusCode, context as otelContext, propagation, trace } from '@opentelemetry/api';
 import {
   ATTR_GEN_AI_AGENT_NAME,
@@ -28,8 +36,6 @@ import {
 } from './config';
 import { parseCopilotReadinessSuggestions, suggestionTitles } from './model-output';
 
-// Client for the outbound Copilot SDK call made inside the Foundry hosted-agent
-// container. It adapts the SDK to the model deployment apphost.mts references.
 const tracer = trace.getTracer('build2026-planner-agent');
 const copilotSystemName = 'github.copilot';
 const copilotAgentName = 'build2026-meeting-readiness';

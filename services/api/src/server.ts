@@ -1,3 +1,11 @@
+// Module: Express entrypoint for the calendar broker API.
+// Exports: nothing; running this file starts the HTTP server.
+// Does: wires middleware, route groups, session-backed browser endpoints,
+// planner queue endpoints, hosted-agent read-only tools, demo controls, error
+// handling, weather lookup, and startup readiness.
+// Why: centralizes calendar write authority so generated planner output is
+// brokered before it can change calendar state.
+
 import './otel';
 import cors from 'cors';
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';

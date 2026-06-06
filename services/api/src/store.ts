@@ -1,3 +1,12 @@
+// Module: state store and broker policy engine for the calendar API.
+// Exports: StateListener, CalendarStore, and BrokerError.
+// Does: loads and persists calendar demo state in a JSON file or PostgreSQL,
+// publishes state changes to server-sent-event listeners, queues planner work,
+// applies or rejects CalendarPatch proposals, manages readiness jobs, and
+// records audit history.
+// Why: gives server.ts one write-authoritative object that enforces calendar
+// safety policies before UI actions or generated planner output mutate state.
+
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';

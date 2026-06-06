@@ -1,9 +1,14 @@
+// Module: direct calendar-planning worker loop.
+// Exports: runPlanningLoop.
+// Does: claims queued user planning intents from the broker, loads current state,
+// builds CalendarPatch proposals, and submits those proposals back to the broker.
+// Why: keeps generated planning suggestions outside the API process while still
+// requiring the broker to approve every calendar mutation.
+
 import { claimNextPlanningIntent, fetchState, submitProposal } from './api-client';
 import { delay, pollMs, workerId } from './config';
 import { createProposal } from './proposal-factory';
 
-// Handles direct calendar-planning intents. The broker API URL comes from
-// API_BASE_URL, which apphost.mts injects from the api resource endpoint.
 export async function runPlanningLoop(): Promise<void> {
   for (;;) {
     try {

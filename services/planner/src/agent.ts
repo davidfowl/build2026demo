@@ -1,5 +1,9 @@
-// Entrypoint for the Foundry hosted-agent resource. apphost.mts runs this as
-// planner-agent, which serves the invocations protocol and calls Copilot/Foundry.
+// Module: Foundry hosted-agent process entrypoint.
+// Exports: nothing; export {} only marks the file as an ES module.
+// Does: initializes telemetry/configuration and starts the hosted-agent HTTP
+// server that receives Foundry invocations.
+// Why: apphost.mts starts this file as planner-agent so readiness analysis can
+// run inside the isolated hosted-agent resource.
 
 export {};
 
